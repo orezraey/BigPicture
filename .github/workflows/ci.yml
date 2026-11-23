@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  ci:
+    name: Check, Clippy & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang pkg-config \
+            libfontconfig1-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libx11-dev libx11-xcb-dev libxrandr-dev \
+            libxcb1-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libudev-dev libasound2-dev libssl-dev libzstd-dev \
+            libvulkan-dev vulkan-validationlayers \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+
+      - name: Install Windows GStreamer & pkg-config
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install pkgconfiglite -y --no-progress
+          $gstVer = "1.24.10"
+          $baseUrl = "https://gstreamer.freedesktop.org/data/pkg/windows/$gstVer/msvc"
+          $runtimeMsi = "$env:RUNNER_TEMP\gstreamer-runtime.msi"
+          $develMsi = "$env:RUNNER_TEMP\gstreamer-devel.msi"
+          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-msvc-x86_64-$gstVer.msi" -OutFile $runtimeMsi
+          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-devel-msvc-x86_64-$gstVer.msi" -OutFile $develMsi
+          $gstRoot = "C:\gstreamer"
+          Start-Process msiexec.exe -ArgumentList "/a `"$runtimeMsi`" /qn TARGETDIR=`"$gstRoot`"" -Wait -NoNewWindow
+          Start-Process msiexec.exe -ArgumentList "/a `"$develMsi`" /qn TARGETDIR=`"$gstRoot`"" -Wait -NoNewWindow
+          $gstPrefix = "$gstRoot\1.0\msvc_x86_64"
+          if (-not (Test-Path "$gstPrefix\lib\pkgconfig")) {
+            $found = Get-ChildItem -Path $gstRoot -Recurse -Filter "gstreamer-1.0.pc" | Select-Object -First 1
+            if ($found) {
+              $gstPrefix = $found.Directory.Parent.Parent.FullName
+            }
+          }
+          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstPrefix" >> $env:GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$gstPrefix\lib\pkgconfig" >> $env:GITHUB_ENV
+          echo "$gstPrefix\bin" >> $env:GITHUB_PATH
+
+      - name: Setup Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+
+      - name: Cargo check (default features / gpui-fast)
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Cargo check (without gpui-fast)
+        run: cargo check -p bigpicture-app --no-default-features --locked
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace --locked

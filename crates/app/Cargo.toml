@@ -1,0 +1,21 @@
+[package]
+name = "bigpicture-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["gpui-fast"]
+gpui-fast = ["gpui-kit/gpui-fast"]
+
+[dependencies]
+bigpicture-core.workspace = true
+bigpicture-providers.workspace = true
+bigpicture-input.workspace = true
+bigpicture-media.workspace = true
+bigpicture-system.workspace = true
+gpui-kit.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
