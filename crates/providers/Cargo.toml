@@ -6,4 +6,6 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bigpicture-core.workspace = true
+tracing.workspace = true

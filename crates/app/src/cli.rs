@@ -1,10 +1,15 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context as _, Result, bail};
 
 /// Parsed command-line arguments for the BigPicture launcher.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CliArgs {
     monitor: Option<usize>,
+    covers_dir: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
     exit_after_ms: Option<u64>,
+    benchmark_scroll: bool,
 }
 
 impl CliArgs {
@@ -29,6 +34,20 @@ impl CliArgs {
                 parsed.monitor = Some(parse_usize(value.as_ref(), "--monitor")?);
             } else if let Some(value) = arg.strip_prefix("--monitor=") {
                 parsed.monitor = Some(parse_usize(value, "--monitor")?);
+            } else if arg == "--covers-dir" {
+                let value = iter
+                    .next()
+                    .context("missing directory path after --covers-dir")?;
+                parsed.covers_dir = Some(PathBuf::from(value.as_ref()));
+            } else if let Some(value) = arg.strip_prefix("--covers-dir=") {
+                parsed.covers_dir = Some(PathBuf::from(value));
+            } else if arg == "--cache-dir" {
+                let value = iter
+                    .next()
+                    .context("missing directory path after --cache-dir")?;
+                parsed.cache_dir = Some(PathBuf::from(value.as_ref()));
+            } else if let Some(value) = arg.strip_prefix("--cache-dir=") {
+                parsed.cache_dir = Some(PathBuf::from(value));
             } else if arg == "--exit-after-ms" {
                 let value = iter
                     .next()
@@ -36,9 +55,11 @@ impl CliArgs {
                 parsed.exit_after_ms = Some(parse_u64(value.as_ref(), "--exit-after-ms")?);
             } else if let Some(value) = arg.strip_prefix("--exit-after-ms=") {
                 parsed.exit_after_ms = Some(parse_u64(value, "--exit-after-ms")?);
+            } else if arg == "--benchmark-scroll" {
+                parsed.benchmark_scroll = true;
             } else if arg == "--help" || arg == "-h" {
                 println!(
-                    "BigPicture Launcher\n\nUsage:\n  bigpicture-app [--monitor <N>] [--exit-after-ms <MS>]"
+                    "BigPicture Launcher\n\nUsage:\n  bigpicture-app [--monitor <N>] [--covers-dir <DIR>] [--cache-dir <DIR>] [--benchmark-scroll] [--exit-after-ms <MS>]"
                 );
                 std::process::exit(0);
             } else {
@@ -53,8 +74,20 @@ impl CliArgs {
         self.monitor
     }
 
+    pub fn covers_dir(&self) -> Option<&Path> {
+        self.covers_dir.as_deref()
+    }
+
+    pub fn cache_dir(&self) -> Option<&Path> {
+        self.cache_dir.as_deref()
+    }
+
     pub fn exit_after_ms(&self) -> Option<u64> {
         self.exit_after_ms
+    }
+
+    pub fn benchmark_scroll(&self) -> bool {
+        self.benchmark_scroll
     }
 }
 
@@ -76,17 +109,29 @@ mod tests {
     fn parses_default_empty_args() {
         let args = CliArgs::parse(std::iter::empty::<&str>()).unwrap();
         assert_eq!(args.monitor(), None);
+        assert_eq!(args.covers_dir(), None);
+        assert_eq!(args.cache_dir(), None);
         assert_eq!(args.exit_after_ms(), None);
+        assert!(!args.benchmark_scroll());
     }
 
     #[test]
-    fn parses_monitor_space_and_equals_forms() {
-        let space = CliArgs::parse(["--monitor", "1"]).unwrap();
-        assert_eq!(space.monitor(), Some(1));
-
-        let equals = CliArgs::parse(["--monitor=0", "--exit-after-ms=500"]).unwrap();
-        assert_eq!(equals.monitor(), Some(0));
-        assert_eq!(equals.exit_after_ms(), Some(500));
+    fn parses_monitor_covers_cache_and_benchmark_flags() {
+        let parsed = CliArgs::parse([
+            "--monitor",
+            "1",
+            "--covers-dir=assets/covers",
+            "--cache-dir",
+            "assets/cache",
+            "--benchmark-scroll",
+            "--exit-after-ms=500",
+        ])
+        .unwrap();
+        assert_eq!(parsed.monitor(), Some(1));
+        assert_eq!(parsed.covers_dir(), Some(Path::new("assets/covers")));
+        assert_eq!(parsed.cache_dir(), Some(Path::new("assets/cache")));
+        assert!(parsed.benchmark_scroll());
+        assert_eq!(parsed.exit_after_ms(), Some(500));
     }
 
     #[test]

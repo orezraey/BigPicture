@@ -5,3 +5,5 @@ Thumbs.db
 *.swp
 .env
 /assets/cache/
+/assets/covers/
+/assets/trailers/

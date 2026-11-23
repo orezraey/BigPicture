@@ -563,7 +563,9 @@ dependencies = [
  "bigpicture-media",
  "bigpicture-providers",
  "bigpicture-system",
+ "gpui-fps",
  "gpui-kit",
+ "image",
  "tracing",
  "tracing-subscriber",
 ]
@@ -579,12 +581,20 @@ version = "0.1.0"
 [[package]]
 name = "bigpicture-media"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "thiserror 2.0.21",
+ "tracing",
+]
 
 [[package]]
 name = "bigpicture-providers"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bigpicture-core",
+ "tracing",
 ]
 
 [[package]]
@@ -2144,6 +2154,7 @@ dependencies = [
  "gpui-pre-shared-string",
  "gpui-pre-sum-tree",
  "gpui-pre-util",
+ "hdrhistogram",
  "heapless",
  "icu_segmenter",
  "image",
@@ -2446,6 +2457,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-fps"
+version = "0.11.0"
+source = "git+https://github.com/longbridge/gpui-kit?branch=main#59d2accb8d55555842071833ddec3c242a609cdd"
+dependencies = [
+ "core-graphics 0.24.0",
+ "gpui-fast",
+ "gpui-pre",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "sysinfo 0.37.2",
+ "uuid",
+ "wayland-client",
+ "web-time",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "gpui-kit"
 version = "0.11.0"
 source = "git+https://github.com/longbridge/gpui-kit?branch=main#59d2accb8d55555842071833ddec3c242a609cdd"
@@ -2503,6 +2532,7 @@ dependencies = [
  "gpui-pre-shared-string",
  "gpui-pre-sum-tree",
  "gpui-pre-util",
+ "hdrhistogram",
  "heapless",
  "icu_segmenter",
  "image",
@@ -3063,6 +3093,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "735eaa21a6a5ffb2e84362faaeb90c05ba8e19797ca30428478cb6ea3a4921bc"
 dependencies = [
  "foldhash",
+]
+
+[[package]]
+name = "hdrhistogram"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d1053f4708f0af3cf9fc5bffc7e68a914a3c45becb231c80068c9c3f78bea"
+dependencies = [
+ "byteorder",
+ "num-traits",
 ]
 
 [[package]]
@@ -4638,6 +4678,16 @@ dependencies = [
  "block2 0.6.2",
  "libc",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+]
+
+[[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
  "objc2-core-foundation",
 ]
 
@@ -6539,6 +6589,20 @@ dependencies = [
  "ntapi",
  "rayon",
  "windows 0.57.0",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.37.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16607d5caffd1c07ce073528f9ed972d88db15dd44023fa57142963be3feb11f"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -8713,7 +8777,7 @@ dependencies = [
  "rand 0.8.8",
  "screencapturekit",
  "screencapturekit-sys",
- "sysinfo",
+ "sysinfo 0.31.4",
  "tao-core-video-sys",
  "windows 0.61.3",
  "windows-capture",

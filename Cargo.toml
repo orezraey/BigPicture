@@ -24,8 +24,10 @@ bigpicture-media = { path = "crates/media" }
 bigpicture-system = { path = "crates/system" }
 
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", branch = "main" }
+gpui-fps = { git = "https://github.com/longbridge/gpui-kit", branch = "main" }
 
 anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "qoi"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
