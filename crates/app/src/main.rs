@@ -1,10 +1,11 @@
+mod backdrop;
 mod benchmark;
 mod cli;
 mod texture_lru;
 mod window;
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,7 +14,7 @@ use bigpicture_core::{CatalogEntry, Direction, GridMetrics};
 use bigpicture_input::NavCommand;
 use bigpicture_media::{
     COVER_HEIGHT, COVER_WIDTH, CacheOutcome, CoverCache, CoverLoaded, CoverLoader,
-    ensure_demo_covers,
+    ensure_demo_covers, ensure_demo_trailers,
 };
 use bigpicture_providers::{CatalogProvider as _, LocalFolderCatalogProvider};
 use gpui_fps::fps_monitor;
@@ -23,6 +24,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::{Frame, RgbaImage};
 
+use crate::backdrop::TrailerBackdrop;
 use crate::benchmark::ScrollBenchmarkRecorder;
 use crate::cli::CliArgs;
 use crate::texture_lru::CoverTextureLru;
@@ -31,6 +33,12 @@ use crate::window::{SelectedMonitorInfo, build_borderless_fullscreen_options};
 const TARGET_CARD_COUNT: usize = 1_000;
 const GPU_COVER_LRU_CAPACITY: usize = 192;
 const KEY_CONTEXT: &str = "BigPictureRoot";
+/// Quanto o foco precisa ficar parado num card para o trailer dele começar.
+const TRAILER_FOCUS_DELAY: Duration = Duration::from_millis(450);
+/// Quantos trailers demo gerar em `assets/trailers` quando a pasta estiver vazia.
+const DEMO_TRAILER_COUNT: usize = 4;
+/// Opacidade do trailer de fundo, para os cards continuarem legíveis.
+const TRAILER_OPACITY: f32 = 0.35;
 
 actions!(
     bigpicture,
@@ -58,6 +66,12 @@ struct LauncherApp {
     benchmark_recorder: Option<ScrollBenchmarkRecorder>,
     /// Índice do card com o foco de navegação (controle e teclado).
     focused: usize,
+    /// Trailer do card focado tocando no fundo.
+    backdrop: TrailerBackdrop,
+    /// Desligado no `--benchmark-scroll`, para não mexer nos números de frame.
+    trailers_enabled: bool,
+    /// Muda a cada movimento de foco; o trailer só troca quando o foco para.
+    focus_generation: u64,
 }
 
 impl LauncherApp {
@@ -105,6 +119,31 @@ impl LauncherApp {
             })
             .detach();
         }
+
+        let (backdrop, trailer_rx) = TrailerBackdrop::new();
+        let trailer_rx = Arc::new(Mutex::new(trailer_rx));
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                let rx = Arc::clone(&trailer_rx);
+                let frame = cx
+                    .background_spawn(async move { rx.lock().ok()?.recv().ok() })
+                    .await;
+                let Some(frame) = frame else {
+                    break;
+                };
+                if this
+                    .update_in(cx, |app, window, cx| {
+                        if app.backdrop.accept(frame, window) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         let shared_rx = Arc::new(Mutex::new(channels.covers));
         cx.spawn_in(window, async move |this, cx| {
@@ -193,7 +232,7 @@ impl LauncherApp {
             .detach();
         }
 
-        Self {
+        let mut app = Self {
             focus_handle,
             monitor_info,
             entries,
@@ -206,7 +245,44 @@ impl LauncherApp {
             cache_misses: 0,
             benchmark_recorder,
             focused: 0,
+            backdrop,
+            trailers_enabled: !benchmark_scroll,
+            focus_generation: 0,
+        };
+        app.play_focused_trailer();
+        app
+    }
+
+    /// Toca o trailer do card focado (ou para o fundo, se ele não tiver trailer).
+    fn play_focused_trailer(&mut self) {
+        if !self.trailers_enabled {
+            return;
         }
+        let path = self
+            .entries
+            .get(self.focused)
+            .and_then(CatalogEntry::trailer_path)
+            .cloned();
+        self.backdrop.play(path.as_deref());
+    }
+
+    /// Troca o trailer só depois que o foco fica parado por `TRAILER_FOCUS_DELAY`, para não
+    /// abrir um pipeline a cada card ao segurar o direcional.
+    fn schedule_trailer(&mut self, cx: &mut Context<Self>) {
+        if !self.trailers_enabled {
+            return;
+        }
+        self.focus_generation += 1;
+        let generation = self.focus_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TRAILER_FOCUS_DELAY).await;
+            let _ = this.update(cx, |app, _cx| {
+                if app.focus_generation == generation {
+                    app.play_focused_trailer();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Aplica um comando de navegação vindo do controle (thread `bp-gamepad`) ou do teclado.
@@ -242,6 +318,7 @@ impl LauncherApp {
         self.focused = next;
         self.scroll_handle
             .scroll_to_item(next / columns, ScrollStrategy::Center);
+        self.schedule_trailer(cx);
         cx.notify();
     }
 
@@ -569,6 +646,18 @@ impl Render for LauncherApp {
             .flex_col()
             .bg(rgb(0x0a0d14))
             .text_color(rgb(0xe6edf3))
+            // Trailer do card focado atrás de tudo (filho absoluto desenhado primeiro).
+            .when_some(self.backdrop.image(), |root, frame| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .opacity(TRAILER_OPACITY)
+                        .child(img(frame).size_full().object_fit(ObjectFit::Cover)),
+                )
+            })
             .child(self.render_header(columns))
             .child(
                 div()
@@ -603,7 +692,19 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("assets/cache/covers_600x900"));
 
     ensure_demo_covers(&covers_dir, TARGET_CARD_COUNT)?;
-    let provider = LocalFolderCatalogProvider::from_directory(&covers_dir, TARGET_CARD_COUNT)?;
+    // Sem GStreamer (ou no benchmark), o launcher segue sem trailers.
+    let trailer_files = if cli.benchmark_scroll() {
+        Vec::new()
+    } else {
+        ensure_demo_trailers(Path::new("assets/trailers"), DEMO_TRAILER_COUNT).unwrap_or_else(
+            |err| {
+                tracing::warn!(error = %err, "trailers desligados");
+                Vec::new()
+            },
+        )
+    };
+    let provider = LocalFolderCatalogProvider::from_directory(&covers_dir, TARGET_CARD_COUNT)?
+        .with_trailer_files(trailer_files);
     let entries = provider.entries();
 
     let cover_cache = CoverCache::new(&cache_dir)?;

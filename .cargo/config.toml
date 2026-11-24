@@ -1,0 +1,6 @@
+# GStreamer no Windows (instalador oficial MSVC x86_64 ou `choco install gstreamer gstreamer-devel`,
+# que instalam em C:\Program Files\gstreamer): o `gstreamer-sys` acha as bibliotecas via
+# pkg-config. A variável com o sufixo do alvo só vale para builds Windows MSVC (não afeta Linux) e
+# tem precedência sobre `PKG_CONFIG_PATH`. Para outra pasta, defina essa mesma variável no ambiente.
+[env]
+PKG_CONFIG_PATH_x86_64_pc_windows_msvc = "C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\lib\\pkgconfig"

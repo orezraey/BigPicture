@@ -45,27 +45,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install pkgconfiglite -y --no-progress
-          $gstVer = "1.24.10"
-          $baseUrl = "https://gstreamer.freedesktop.org/data/pkg/windows/$gstVer/msvc"
-          $runtimeMsi = "$env:RUNNER_TEMP\gstreamer-runtime.msi"
-          $develMsi = "$env:RUNNER_TEMP\gstreamer-devel.msi"
-          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-msvc-x86_64-$gstVer.msi" -OutFile $runtimeMsi
-          Invoke-WebRequest -Uri "$baseUrl/gstreamer-1.0-devel-msvc-x86_64-$gstVer.msi" -OutFile $develMsi
-          $gstRoot = "C:\gstreamer"
-          Start-Process msiexec.exe -ArgumentList "/a `"$runtimeMsi`" /qn TARGETDIR=`"$gstRoot`"" -Wait -NoNewWindow
-          Start-Process msiexec.exe -ArgumentList "/a `"$develMsi`" /qn TARGETDIR=`"$gstRoot`"" -Wait -NoNewWindow
-          $gstPrefix = "$gstRoot\1.0\msvc_x86_64"
-          if (-not (Test-Path "$gstPrefix\lib\pkgconfig")) {
-            $found = Get-ChildItem -Path $gstRoot -Recurse -Filter "gstreamer-1.0.pc" | Select-Object -First 1
-            if ($found) {
-              $gstPrefix = $found.Directory.Parent.Parent.FullName
-            }
+          # O link direto do MSI 1.24.10 no freedesktop.org passou a dar 404; o choco empacota
+          # os instaladores oficiais (runtime + devel MSVC x86_64).
+          choco install gstreamer gstreamer-devel pkgconfiglite -y --no-progress
+          $gstPrefix = "C:\gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$gstPrefix\lib\pkgconfig\gstreamer-1.0.pc")) {
+            $found = Get-ChildItem -Path "C:\gstreamer", "C:\Program Files\gstreamer" -Recurse -Filter "gstreamer-1.0.pc" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $found) { throw "gstreamer-1.0.pc não encontrado após a instalação" }
+            $gstPrefix = $found.Directory.Parent.Parent.FullName
           }
-          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstPrefix" >> $env:GITHUB_ENV
+          echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstPrefix\" >> $env:GITHUB_ENV
           echo "PKG_CONFIG_PATH=$gstPrefix\lib\pkgconfig" >> $env:GITHUB_ENV
           echo "$gstPrefix\bin" >> $env:GITHUB_PATH
-
       - name: Setup Rust toolchain (from rust-toolchain.toml)
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:

@@ -3,10 +3,14 @@
 pub mod cover_cache;
 pub mod cover_loader;
 pub mod demo_covers;
+pub mod demo_trailers;
+pub mod trailer;
 
 pub use cover_cache::{CacheOutcome, CoverCache};
 pub use cover_loader::{CoverLoaded, CoverLoader};
 pub use demo_covers::{ensure_demo_covers, list_image_files};
+pub use demo_trailers::{ensure_demo_trailers, list_trailer_files};
+pub use trailer::{TrailerPlayer, init_gstreamer};
 
 /// Target dimensions for game cover artwork in the launcher grid.
 pub const COVER_WIDTH: u32 = 600;

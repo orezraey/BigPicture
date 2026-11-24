@@ -10,3 +10,5 @@ anyhow.workspace = true
 image.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true

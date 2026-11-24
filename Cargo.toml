@@ -26,6 +26,8 @@ bigpicture-system = { path = "crates/system" }
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", branch = "main" }
 gpui-fps = { git = "https://github.com/longbridge/gpui-kit", branch = "main" }
 
+gstreamer = { git = "https://gitlab.freedesktop.org/gstreamer/gstreamer-rs", branch = "main" }
+gstreamer-app = { git = "https://gitlab.freedesktop.org/gstreamer/gstreamer-rs", branch = "main" }
 gilrs = { git = "https://gitlab.com/gilrs-project/gilrs", default-features = false, features = ["xinput"] }
 
 anyhow = "1"

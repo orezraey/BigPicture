@@ -27,6 +27,8 @@ pub struct CatalogEntry {
     title: String,
     subtitle: Option<String>,
     cover_path: Option<PathBuf>,
+    /// Vídeo WebM tocado em loop no fundo quando o card está focado.
+    trailer_path: Option<PathBuf>,
     executable: Option<PathBuf>,
     args: Vec<String>,
 }
@@ -38,6 +40,7 @@ impl CatalogEntry {
             title: title.into(),
             subtitle: None,
             cover_path: None,
+            trailer_path: None,
             executable: None,
             args: Vec::new(),
         }
@@ -50,6 +53,11 @@ impl CatalogEntry {
 
     pub fn with_cover_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.cover_path = Some(path.into());
+        self
+    }
+
+    pub fn with_trailer_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trailer_path = Some(path.into());
         self
     }
 
@@ -81,6 +89,10 @@ impl CatalogEntry {
 
     pub fn cover_path(&self) -> Option<&PathBuf> {
         self.cover_path.as_ref()
+    }
+
+    pub fn trailer_path(&self) -> Option<&PathBuf> {
+        self.trailer_path.as_ref()
     }
 
     pub fn executable(&self) -> Option<&PathBuf> {

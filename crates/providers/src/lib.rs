@@ -87,6 +87,7 @@ impl CatalogProvider for StaticCatalogProvider {
 pub struct LocalFolderCatalogProvider {
     covers_dir: PathBuf,
     cover_files: Vec<PathBuf>,
+    trailer_files: Vec<PathBuf>,
     target_count: usize,
 }
 
@@ -123,8 +124,15 @@ impl LocalFolderCatalogProvider {
         Ok(Self {
             covers_dir,
             cover_files,
+            trailer_files: Vec::new(),
             target_count,
         })
+    }
+
+    /// Trailers distribuídos entre os cards em ciclo, como as capas.
+    pub fn with_trailer_files(mut self, trailer_files: Vec<PathBuf>) -> Self {
+        self.trailer_files = trailer_files;
+        self
     }
 
     pub fn covers_dir(&self) -> &Path {
@@ -156,6 +164,11 @@ impl CatalogProvider for LocalFolderCatalogProvider {
                 if !self.cover_files.is_empty() {
                     let cover = &self.cover_files[ix % self.cover_files.len()];
                     entry = entry.with_cover_path(cover.clone());
+                }
+
+                if !self.trailer_files.is_empty() {
+                    let trailer = &self.trailer_files[ix % self.trailer_files.len()];
+                    entry = entry.with_trailer_path(trailer.clone());
                 }
 
                 entry
@@ -194,6 +207,13 @@ mod tests {
         assert_eq!(entries.len(), 1_000);
         assert!(entries[0].cover_path().unwrap().ends_with("a.png"));
         assert!(entries[1].cover_path().unwrap().ends_with("b.qoi"));
+        assert!(entries[0].trailer_path().is_none());
+
+        let with_trailers = provider
+            .with_trailer_files(vec![PathBuf::from("t0.webm"), PathBuf::from("t1.webm")]);
+        let entries = with_trailers.entries();
+        assert!(entries[0].trailer_path().unwrap().ends_with("t0.webm"));
+        assert!(entries[3].trailer_path().unwrap().ends_with("t1.webm"));
 
         let _ = fs::remove_dir_all(&dir);
     }
