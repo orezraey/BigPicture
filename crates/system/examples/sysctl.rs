@@ -102,8 +102,14 @@ fn launch(sys: &dyn SystemControl, args: &[String]) -> Result<(), String> {
     let result = sys.bring_launcher_to_front(a).map_err(|e| e.to_string());
     println!("  resultado: {result:?}");
     sleep(Duration::from_secs(1));
+    println!("fechando A e B (WM_CLOSE)");
+    for window in [a, b] {
+        sys.close_window(window).map_err(|e| e.to_string())?;
+    }
+    sleep(Duration::from_secs(1));
     for pid in [pid_a, pid_b] {
-        let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string()]).output();
+        let open = !sys.windows_of_process(pid).map_err(|e| e.to_string())?.is_empty();
+        println!("  pid {pid} ainda com janela: {open}");
     }
     result
 }

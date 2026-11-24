@@ -75,6 +75,10 @@ impl SystemControl for LinuxSystem {
         Err(SystemError::Unsupported("minimize_window (pendente: EWMH / KWin)"))
     }
 
+    fn close_window(&self, _: WindowId) -> Result<()> {
+        Err(SystemError::Unsupported("close_window (pendente: _NET_CLOSE_WINDOW / KWin)"))
+    }
+
     fn focus_window(&self, _: WindowId) -> Result<()> {
         Err(SystemError::Unsupported("focus_window (pendente: _NET_ACTIVE_WINDOW / KWin)"))
     }

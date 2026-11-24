@@ -143,6 +143,9 @@ pub trait SystemControl: Send + Sync {
 
     fn minimize_window(&self, window: WindowId) -> Result<()>;
 
+    /// Pede para a janela fechar, como o botão X (o app pode perguntar se quer salvar).
+    fn close_window(&self, window: WindowId) -> Result<()>;
+
     /// Restaura (se minimizada) e põe a janela em primeiro plano.
     fn focus_window(&self, window: WindowId) -> Result<()>;
 
@@ -216,6 +219,10 @@ impl SystemControl for UnsupportedSystem {
 
     fn minimize_window(&self, _: WindowId) -> Result<()> {
         Err(SystemError::Unsupported("minimize_window"))
+    }
+
+    fn close_window(&self, _: WindowId) -> Result<()> {
+        Err(SystemError::Unsupported("close_window"))
     }
 
     fn focus_window(&self, _: WindowId) -> Result<()> {

@@ -1,6 +1,7 @@
 mod backdrop;
 mod benchmark;
 mod cli;
+mod game_menu;
 mod texture_lru;
 mod window;
 
@@ -28,6 +29,7 @@ use image::{Frame, RgbaImage};
 use crate::backdrop::TrailerBackdrop;
 use crate::benchmark::ScrollBenchmarkRecorder;
 use crate::cli::CliArgs;
+use crate::game_menu::{GameAction, GameMenu, RunningGame};
 use crate::texture_lru::CoverTextureLru;
 use crate::window::{SelectedMonitorInfo, build_borderless_fullscreen_options};
 
@@ -79,6 +81,10 @@ struct LauncherApp {
     launcher_window: Option<WindowId>,
     /// `--demo-launch`: o que o Confirmar abre nos cards sem executável.
     demo_launch: Option<PathBuf>,
+    /// Último jogo aberto pelo launcher, enquanto ainda tiver janela.
+    running_game: Option<RunningGame>,
+    /// Menu do jogo (Guide com um jogo aberto); enquanto aberto, a navegação vai para ele.
+    game_menu: Option<GameMenu>,
 }
 
 /// Opções de inicialização da janela vindas da linha de comando.
@@ -268,6 +274,8 @@ impl LauncherApp {
             system: Arc::from(bigpicture_system::platform()),
             launcher_window: None,
             demo_launch,
+            running_game: None,
+            game_menu: None,
         };
         app.play_focused_trailer();
         app
@@ -307,18 +315,144 @@ impl LauncherApp {
 
     /// Aplica um comando de navegação vindo do controle (thread `bp-gamepad`) ou do teclado.
     fn handle_nav(&mut self, cmd: NavCommand, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = &mut self.game_menu {
+            match cmd {
+                NavCommand::Up | NavCommand::Down | NavCommand::Left | NavCommand::Right => {
+                    if let Some(dir) = cmd.direction() {
+                        menu.step(dir);
+                    }
+                }
+                NavCommand::Confirm => {
+                    let action = menu.selected();
+                    self.run_game_action(action);
+                }
+                NavCommand::Guide => self.run_game_action(GameAction::Resume),
+                NavCommand::Back => self.game_menu = None,
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if let Some(dir) = cmd.direction() {
             self.move_focus(dir, cx);
             return;
         }
         match cmd {
             NavCommand::Confirm => self.launch_focused(),
-            NavCommand::Guide => self.bring_launcher_back(),
+            NavCommand::Guide => {
+                self.bring_launcher_back();
+                if self.running_game.is_some() && !self.game_windows().is_empty() {
+                    self.game_menu = Some(GameMenu::default());
+                } else {
+                    self.running_game = None;
+                }
+                cx.notify();
+            }
             NavCommand::Back | NavCommand::Menu => {
                 tracing::info!(command = ?cmd, "comando sem tela associada ainda");
             }
             _ => {}
         }
+    }
+
+    /// Janelas do jogo aberto (vazio se ele já fechou).
+    fn game_windows(&self) -> Vec<WindowId> {
+        self.running_game
+            .as_ref()
+            .and_then(|game| self.system.windows_of_process(game.pid).ok())
+            .unwrap_or_default()
+    }
+
+    fn run_game_action(&mut self, action: GameAction) {
+        self.game_menu = None;
+        let windows = self.game_windows();
+        if windows.is_empty() {
+            self.running_game = None;
+            return;
+        }
+        let result = match action {
+            GameAction::Resume => self.system.bring_launcher_to_front(windows[0]),
+            GameAction::Minimize => windows
+                .iter()
+                .try_for_each(|w| self.system.minimize_window(*w)),
+            GameAction::Close => {
+                let closed = windows.iter().try_for_each(|w| self.system.close_window(*w));
+                if closed.is_ok() {
+                    self.running_game = None;
+                }
+                closed
+            }
+        };
+        match result {
+            Ok(()) => tracing::info!(action = action.label(), "ação no jogo"),
+            Err(err) => tracing::warn!(action = action.label(), error = %err, "ação no jogo falhou"),
+        }
+    }
+
+    fn render_game_menu(&self) -> Option<impl IntoElement + use<>> {
+        let menu = self.game_menu?;
+        let title = self.running_game.as_ref()?.title.clone();
+        let buttons = GameAction::ALL.into_iter().map(move |action| {
+            let selected = menu.selected() == action;
+            div()
+                .px(px(28.))
+                .py(px(14.))
+                .rounded(px(10.))
+                .text_size(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .border_2()
+                .border_color(if selected {
+                    rgb(0x58a6ff)
+                } else {
+                    rgb(0x30363d)
+                })
+                .bg(if selected { rgb(0x1f3a5f) } else { rgb(0x161b22) })
+                .text_color(rgb(0xf0f6fc))
+                .child(action.label())
+        });
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(24.))
+                        .p(px(40.))
+                        .rounded(px(16.))
+                        .bg(rgb(0x0d1117))
+                        .border_1()
+                        .border_color(rgb(0x30363d))
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(rgb(0x8b949e))
+                                .child("EM EXECUÇÃO"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(28.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xf0f6fc))
+                                .child(title),
+                        )
+                        .child(div().flex().gap(px(16.)).children(buttons))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(rgb(0x8b949e))
+                                .child("A confirma · B fecha o menu · Guide volta ao jogo"),
+                        ),
+                ),
+        )
     }
 
     /// Abre o jogo do card focado (ou o `--demo-launch`, nos cards demo).
@@ -339,7 +473,13 @@ impl LauncherApp {
             working_dir: None,
         };
         match self.system.launch_app(&request) {
-            Ok(app) => tracing::info!(title = entry.title(), pid = app.pid, "jogo aberto"),
+            Ok(app) => {
+                tracing::info!(title = entry.title(), pid = app.pid, "jogo aberto");
+                self.running_game = Some(RunningGame {
+                    pid: app.pid,
+                    title: entry.title().to_string(),
+                });
+            }
             Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir jogo"),
         }
     }
@@ -731,6 +871,7 @@ impl Render for LauncherApp {
                     .child(grid)
                     .child(Scrollbar::vertical(&self.scroll_handle)),
             )
+            .children(self.render_game_menu())
             .child(fps_monitor(window, cx))
     }
 }
@@ -809,6 +950,8 @@ fn main() -> anyhow::Result<()> {
                 KeyBinding::new("right", NavRight, Some(KEY_CONTEXT)),
                 KeyBinding::new("enter", NavConfirm, Some(KEY_CONTEXT)),
                 KeyBinding::new("backspace", NavBack, Some(KEY_CONTEXT)),
+                // Equivalente de teclado ao Guide (só chega quando o launcher tem o foco).
+                KeyBinding::new("home", NavGuide, Some(KEY_CONTEXT)),
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 

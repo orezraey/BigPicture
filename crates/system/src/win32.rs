@@ -4,7 +4,7 @@
 
 use std::mem::size_of;
 
-use windows::Win32::Foundation::{HWND, LPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
     DISPLAY_DEVICE_PRIMARY_DEVICE, DISPLAY_DEVICEW, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
@@ -17,7 +17,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    IsIconic, IsWindowVisible, PostMessageW, SW_MINIMIZE, WM_CLOSE, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR};
 
@@ -193,6 +193,12 @@ impl SystemControl for WindowsSystem {
         // ShowWindow devolve o estado anterior de visibilidade, não sucesso.
         let _ = unsafe { ShowWindow(hwnd(window), SW_MINIMIZE) };
         Ok(())
+    }
+
+    fn close_window(&self, window: WindowId) -> Result<()> {
+        // SAFETY: HWND inválido só faz a chamada falhar; WM_CLOSE não leva ponteiros.
+        unsafe { PostMessageW(Some(hwnd(window)), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+            .map_err(|e| SystemError::Failed(format!("WM_CLOSE: {e}")))
     }
 
     fn focus_window(&self, window: WindowId) -> Result<()> {
