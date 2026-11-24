@@ -3,6 +3,7 @@ mod benchmark;
 mod cli;
 mod display_menu;
 mod game_menu;
+mod steam_sync;
 mod texture_lru;
 mod window;
 
@@ -21,6 +22,7 @@ use bigpicture_media::{
 };
 use bigpicture_providers::epic::EpicLibrary;
 use bigpicture_providers::steam::SteamLibrary;
+use bigpicture_providers::steam_client::OwnedGame;
 use bigpicture_providers::{CatalogProvider as _, InstalledAppsProvider, LocalFolderCatalogProvider};
 use gpui_fps::fps_monitor;
 use gpui_kit::component::scroll::Scrollbar;
@@ -57,6 +59,8 @@ struct InputChannels {
     covers: std::sync::mpsc::Receiver<CoverLoaded>,
     /// `None` quando a thread do controle não pôde ser criada (só teclado).
     nav: Option<std::sync::mpsc::Receiver<NavCommand>>,
+    /// Biblioteca completa da Steam lida do cliente em segundo plano.
+    steam_library: Option<std::sync::mpsc::Receiver<Vec<OwnedGame>>>,
 }
 
 struct LauncherApp {
@@ -73,6 +77,10 @@ struct LauncherApp {
     benchmark_recorder: Option<ScrollBenchmarkRecorder>,
     /// Índice do card com o foco de navegação (controle e teclado).
     focused: usize,
+    /// Steam instalada, para remontar os cards quando a biblioteca completa chegar.
+    steam: Option<SteamLibrary>,
+    /// Cards que vêm depois dos da Steam (Epic, apps instalados, demo).
+    other_entries: Vec<CatalogEntry>,
     /// Trailer do card focado tocando no fundo.
     backdrop: TrailerBackdrop,
     /// Desligado no `--benchmark-scroll`, para não mexer nos números de frame.
@@ -97,6 +105,8 @@ struct LauncherApp {
 struct LaunchOptions {
     benchmark_scroll: bool,
     demo_launch: Option<PathBuf>,
+    steam: Option<SteamLibrary>,
+    other_entries: Vec<CatalogEntry>,
 }
 
 impl LauncherApp {
@@ -112,6 +122,8 @@ impl LauncherApp {
         let LaunchOptions {
             benchmark_scroll,
             demo_launch,
+            steam,
+            other_entries,
         } = options;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -173,6 +185,23 @@ impl LauncherApp {
             }
         })
         .detach();
+
+        if let Some(library_rx) = channels.steam_library {
+            let library_rx = Arc::new(Mutex::new(library_rx));
+            cx.spawn_in(window, async move |this, cx| {
+                let rx = Arc::clone(&library_rx);
+                let owned = cx
+                    .background_spawn(async move { rx.lock().ok()?.recv().ok() })
+                    .await;
+                if let Some(owned) = owned {
+                    let _ = this.update_in(cx, |app, _window, cx| {
+                        app.apply_steam_library(&owned);
+                        cx.notify();
+                    });
+                }
+            })
+            .detach();
+        }
 
         let shared_rx = Arc::new(Mutex::new(channels.covers));
         cx.spawn_in(window, async move |this, cx| {
@@ -274,6 +303,8 @@ impl LauncherApp {
             cache_misses: 0,
             benchmark_recorder,
             focused: 0,
+            steam,
+            other_entries,
             backdrop,
             trailers_enabled: !benchmark_scroll,
             focus_generation: 0,
@@ -286,6 +317,22 @@ impl LauncherApp {
         };
         app.play_focused_trailer();
         app
+    }
+
+    /// Troca os cards da Steam pela biblioteca completa lida do cliente, mantendo o foco no
+    /// mesmo jogo quando ele continua na grade.
+    fn apply_steam_library(&mut self, owned: &[OwnedGame]) {
+        let Some(steam) = &self.steam else {
+            return;
+        };
+        let focused_id = self.entries.get(self.focused).map(|e| e.id().clone());
+        let mut entries = steam.entries_with_owned(owned, Path::new(steam_sync::COVER_CACHE));
+        entries.extend(self.other_entries.iter().cloned());
+        self.focused = focused_id
+            .and_then(|id| entries.iter().position(|e| *e.id() == id))
+            .unwrap_or(0);
+        tracing::info!(cards = entries.len(), "grade atualizada com a biblioteca completa da Steam");
+        self.entries = entries;
     }
 
     /// Toca o trailer do card focado (ou para o fundo, se ele não tiver trailer).
@@ -858,7 +905,10 @@ impl LauncherApp {
         if maybe_image.is_none()
             && let Some(path) = entry.cover_path()
         {
-            self.cover_loader.request(card_id, path.clone());
+            match entry.cover_url() {
+                Some(url) => self.cover_loader.request_remote(card_id, path.clone(), url),
+                None => self.cover_loader.request(card_id, path.clone()),
+            }
         }
 
         let card_w = px(self.grid_metrics.card_width);
@@ -1164,9 +1214,19 @@ fn main() -> anyhow::Result<()> {
     // capas demo; fora dele, as capas demo só entram quando não há nenhum jogo instalado (ou com
     // --demo-catalog).
     let mut entries = Vec::new();
+    let mut steam_entries_len = 0;
+    let steam = (!cli.benchmark_scroll()).then(SteamLibrary::detect).flatten();
+    let (library_tx, library_rx) = std::sync::mpsc::channel();
     if !cli.benchmark_scroll() {
-        if let Some(steam) = SteamLibrary::detect() {
-            entries.extend(steam.entries());
+        if let Some(steam) = &steam {
+            // A última biblioteca completa (cache) aparece na hora; a leitura do cliente atualiza
+            // a grade quando termina.
+            match steam_sync::load_cached() {
+                Some(owned) => entries.extend(steam.entries_with_owned(&owned, Path::new(steam_sync::COVER_CACHE))),
+                None => entries.extend(steam.entries()),
+            }
+            steam_entries_len = entries.len();
+            steam_sync::spawn(steam.root().to_path_buf(), library_tx);
         }
         if let Some(epic) = EpicLibrary::detect() {
             entries.extend(epic.entries());
@@ -1198,6 +1258,8 @@ fn main() -> anyhow::Result<()> {
     let options = LaunchOptions {
         benchmark_scroll: cli.benchmark_scroll(),
         demo_launch: cli.demo_launch().map(Path::to_path_buf),
+        other_entries: entries[steam_entries_len..].to_vec(),
+        steam,
     };
 
     let (nav_tx, nav_rx) = std::sync::mpsc::channel();
@@ -1211,6 +1273,7 @@ fn main() -> anyhow::Result<()> {
     let channels = InputChannels {
         covers: cover_rx,
         nav: nav_rx,
+        steam_library: options.steam.is_some().then_some(library_rx),
     };
 
     gpui_kit::application()

@@ -29,6 +29,8 @@ pub struct CatalogEntry {
     title: String,
     subtitle: Option<String>,
     cover_path: Option<PathBuf>,
+    /// De onde baixar a capa quando `cover_path` ainda não existe no disco (CDN da loja).
+    cover_url: Option<String>,
     /// Vídeo WebM tocado em loop no fundo quando o card está focado.
     trailer_path: Option<PathBuf>,
     executable: Option<PathBuf>,
@@ -49,6 +51,7 @@ impl CatalogEntry {
             title: title.into(),
             subtitle: None,
             cover_path: None,
+            cover_url: None,
             trailer_path: None,
             executable: None,
             args: Vec::new(),
@@ -85,6 +88,17 @@ impl CatalogEntry {
     {
         self.args = args.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Capa que ainda pode não estar no disco: `path` é onde ela fica depois de baixada de `url`.
+    pub fn with_remote_cover(mut self, path: impl Into<PathBuf>, url: impl Into<String>) -> Self {
+        self.cover_path = Some(path.into());
+        self.cover_url = Some(url.into());
+        self
+    }
+
+    pub fn cover_url(&self) -> Option<&str> {
+        self.cover_url.as_deref()
     }
 
     pub fn with_source(mut self, source: GameSource) -> Self {

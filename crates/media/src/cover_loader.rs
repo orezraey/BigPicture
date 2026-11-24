@@ -18,11 +18,15 @@ pub struct CoverLoaded {
 struct CoverJob {
     id: String,
     source_path: PathBuf,
+    /// Baixa daqui para `source_path` quando o arquivo ainda não existe.
+    url: Option<String>,
 }
 
 struct QueueState {
     pending: VecDeque<CoverJob>,
     in_flight: HashSet<String>,
+    /// Capas que falharam (arquivo ruim, download 404): não tenta de novo nesta execução.
+    failed: HashSet<String>,
     shutdown: bool,
 }
 
@@ -43,6 +47,7 @@ impl CoverLoader {
             Mutex::new(QueueState {
                 pending: VecDeque::new(),
                 in_flight: HashSet::new(),
+                failed: HashSet::new(),
                 shutdown: false,
             }),
             Condvar::new(),
@@ -68,19 +73,31 @@ impl CoverLoader {
 
     /// Enqueues a cover for off-thread decoding/caching if it is not already in flight.
     pub fn request(&self, id: impl Into<String>, source_path: impl Into<PathBuf>) {
-        let id = id.into();
-        let source_path = source_path.into();
+        self.enqueue(id.into(), source_path.into(), None);
+    }
+
+    /// Como [`CoverLoader::request`], mas baixa a imagem de `url` para `source_path` antes, se
+    /// ela ainda não estiver no disco (capas do CDN da loja).
+    pub fn request_remote(&self, id: impl Into<String>, source_path: impl Into<PathBuf>, url: impl Into<String>) {
+        self.enqueue(id.into(), source_path.into(), Some(url.into()));
+    }
+
+    fn enqueue(&self, id: String, source_path: PathBuf, url: Option<String>) {
 
         let (lock, cvar) = &*self.shared;
         let Ok(mut state) = lock.lock() else {
             return;
         };
-        if state.shutdown || state.in_flight.contains(&id) {
+        if state.shutdown || state.in_flight.contains(&id) || state.failed.contains(&id) {
             return;
         }
         state.in_flight.insert(id.clone());
         // Push back & pop back = LIFO priority so freshly scrolled-into-view cards decode first.
-        state.pending.push_back(CoverJob { id, source_path });
+        state.pending.push_back(CoverJob {
+            id,
+            source_path,
+            url,
+        });
         // Bound queue backlog so rapid scrolling across 1,000 cards drops stale offscreen requests.
         while state.pending.len() > 160 {
             if let Some(dropped) = state.pending.pop_front() {
@@ -103,6 +120,24 @@ impl Drop for CoverLoader {
             let _ = handle.join();
         }
     }
+}
+
+/// Baixa `url` para `dest` (gravando num temporário e renomeando no fim).
+fn download(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let bytes = ureq::get(url)
+        .call()
+        .with_context(|| format!("baixando {url}"))?
+        .body_mut()
+        .read_to_vec()
+        .with_context(|| format!("lendo {url}"))?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = dest.with_extension("download");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
 }
 
 fn worker_loop(
@@ -132,10 +167,17 @@ fn worker_loop(
             continue;
         };
 
-        let result = cache.load_or_decode(&job.source_path);
+        let result = match &job.url {
+            Some(url) if !job.source_path.is_file() => download(url, &job.source_path),
+            _ => Ok(()),
+        }
+        .and_then(|()| cache.load_or_decode(&job.source_path));
 
         if let Ok(mut state) = lock.lock() {
             state.in_flight.remove(&job.id);
+            if result.is_err() {
+                state.failed.insert(job.id.clone());
+            }
         }
 
         match result {

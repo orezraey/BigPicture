@@ -87,6 +87,18 @@ mod tests {
     }
 
     #[test]
+    fn decodes_cover_by_content_even_with_wrong_extension() {
+        let root = temp_test_dir("wrong_ext");
+        let src = root.join("library_600x900.jpg");
+        image::RgbaImage::from_pixel(30, 45, image::Rgba([1, 2, 3, 255]))
+            .save_with_format(&src, image::ImageFormat::Png)
+            .unwrap();
+        let cache = CoverCache::new(root.join("cache")).unwrap();
+        let (frame, outcome) = cache.load_or_decode(&src).unwrap();
+        assert_eq!((frame.width(), frame.height(), outcome), (600, 900, CacheOutcome::Miss));
+    }
+
+    #[test]
     fn cover_cache_resizes_to_600x900_and_serves_disk_hits() {
         let root = temp_test_dir("cache_hit_miss");
         let src_dir = root.join("src");

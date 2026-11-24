@@ -70,7 +70,11 @@ impl CoverCache {
             }
         }
 
-        let dyn_img = image::open(source_path)
+        // Pelo conteúdo, não pela extensão: a Steam grava PNG com nome `library_600x900.jpg`.
+        let dyn_img = image::ImageReader::open(source_path)
+            .and_then(|reader| reader.with_guessed_format())
+            .with_context(|| format!("failed to open source cover {}", source_path.display()))?
+            .decode()
             .with_context(|| format!("failed to decode source cover {}", source_path.display()))?;
         let resized = if dyn_img.width() == COVER_WIDTH && dyn_img.height() == COVER_HEIGHT {
             dyn_img.into_rgba8()

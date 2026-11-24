@@ -9,6 +9,7 @@ use bigpicture_core::{Achievement, CatalogEntry, GameSource};
 
 use crate::CatalogProvider;
 use crate::keyvalues::{Kv, parse_binary, parse_text};
+use crate::steam_client::{OwnedGame, cdn_cover_path, cdn_cover_url};
 
 /// Diferença entre o SteamID64 e o "account id" que nomeia os arquivos de estatística.
 const STEAMID64_BASE: u64 = 76_561_197_960_265_728;
@@ -121,8 +122,10 @@ impl SteamLibrary {
         if flat.is_file() {
             return Some(flat);
         }
-        // Layout novo: pasta por appid, às vezes com subpasta de hash.
-        find_named(&cache.join(app_id.to_string()), "library_600x900", 2)
+        // Layout novo: pasta por appid, às vezes com subpasta de hash; jogos recentes chamam a
+        // capa vertical de `library_capsule`.
+        let dir = cache.join(app_id.to_string());
+        find_named(&dir, "library_600x900", 2).or_else(|| find_named(&dir, "library_capsule", 2))
     }
 
     /// Account id do usuário logado por último (o que nomeia `UserGameStats_<id>_<appid>.bin`).
@@ -159,6 +162,51 @@ impl SteamLibrary {
             .map(|account| stats.join(format!("UserGameStats_{account}_{app_id}.bin")))
             .and_then(|p| read_binary_kv(&p));
         achievements_from(&schema, user.as_ref(), app_id)
+    }
+}
+
+impl SteamLibrary {
+    /// Cards da biblioteca completa (`owned`, lida do cliente) somada aos jogos instalados que
+    /// a lista não tenha. Instalados primeiro, depois os demais, cada grupo em ordem alfabética.
+    /// Jogos ocultos na Steam ficam de fora. Capas que o cliente ainda não baixou vêm do CDN
+    /// da Steam para `cdn_cache`.
+    pub fn entries_with_owned(&self, owned: &[OwnedGame], cdn_cache: &Path) -> Vec<CatalogEntry> {
+        let installed = self.installed_games();
+        let mut entries: Vec<(bool, CatalogEntry)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for game in owned.iter().filter(|g| !g.hidden) {
+            let local = installed.iter().find(|i| i.app_id == game.app_id);
+            seen.insert(game.app_id);
+            let subtitle = match (local.is_some(), game.family_owner.is_some()) {
+                (true, false) => "Steam",
+                (true, true) => "Steam · Família",
+                (false, false) => "Steam · Não instalado",
+                (false, true) => "Steam · Família · Não instalado",
+            };
+            let mut entry = self.entry(game.app_id, &game.name, subtitle, game.capsule.as_deref(), cdn_cache);
+            if let Some(local) = local {
+                entry = entry.with_install_dir(local.install_dir.clone());
+            }
+            entries.push((local.is_some(), entry));
+        }
+        for game in installed.iter().filter(|g| !seen.contains(&g.app_id)) {
+            let entry = self.entry(game.app_id, &game.name, "Steam", None, cdn_cache).with_install_dir(game.install_dir.clone());
+            entries.push((true, entry));
+        }
+        entries.sort_by_key(|(installed, e)| (!installed, e.title().to_lowercase()));
+        entries.into_iter().map(|(_, e)| e).collect()
+    }
+
+    fn entry(&self, app_id: u32, name: &str, subtitle: &str, capsule: Option<&str>, cdn_cache: &Path) -> CatalogEntry {
+        let entry = CatalogEntry::new(format!("steam-{app_id}"), name)
+            .with_subtitle(subtitle)
+            .with_source(GameSource::Steam { app_id })
+            // Para jogo não instalado, a própria Steam oferece a instalação.
+            .with_launch_uri(format!("steam://rungameid/{app_id}"));
+        match self.cover(app_id) {
+            Some(cover) => entry.with_cover_path(cover),
+            None => entry.with_remote_cover(cdn_cover_path(cdn_cache, app_id), cdn_cover_url(app_id, capsule)),
+        }
     }
 }
 
@@ -371,6 +419,38 @@ mod tests {
         assert_eq!(cookie.source(), &GameSource::Steam { app_id: 1454400 });
         assert!(cookie.cover_path().unwrap().ends_with("library_600x900.jpg"));
         assert!(entries.iter().find(|e| e.title() == "Clair Obscur").unwrap().cover_path().is_none());
+
+        // Biblioteca completa: soma os não instalados, tira os ocultos, instalados primeiro.
+        let owned = |id: u32, name: &str, hidden: bool, family: Option<u32>| OwnedGame {
+            app_id: id,
+            name: name.into(),
+            installed: false,
+            hidden,
+            playtime_minutes: 0,
+            last_played: 0,
+            family_owner: family,
+            capsule: None,
+        };
+        let full = steam.entries_with_owned(
+            &[
+                owned(1454400, "Cookie Clicker", false, Some(7)),
+                owned(620, "Portal 2", false, None),
+                owned(400, "Portal", true, None),
+                owned(10, "Aardvark", false, None),
+            ],
+            &root.join("cdn"),
+        );
+        let titles: Vec<&str> = full.iter().map(CatalogEntry::title).collect();
+        assert_eq!(titles, ["Clair Obscur", "Cookie Clicker", "Aardvark", "Portal 2"]);
+        assert_eq!(full[1].subtitle(), Some("Steam · Família"));
+        assert_eq!(full[3].subtitle(), Some("Steam · Não instalado"));
+        assert!(full[3].install_dir().is_none());
+        assert_eq!(
+            full[3].cover_url(),
+            Some("https://shared.steamstatic.com/store_item_assets/steam/apps/620/library_600x900.jpg")
+        );
+        assert!(full[3].cover_path().unwrap().starts_with(root.join("cdn")));
+        assert!(full[1].cover_url().is_none(), "capa local tem preferência");
         let _ = fs::remove_dir_all(&root);
     }
 

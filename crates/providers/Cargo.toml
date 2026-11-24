@@ -10,3 +10,4 @@ anyhow.workspace = true
 bigpicture-core.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
+tungstenite.workspace = true

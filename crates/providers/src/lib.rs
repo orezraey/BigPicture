@@ -3,6 +3,7 @@
 pub mod epic;
 pub mod keyvalues;
 pub mod steam;
+pub mod steam_client;
 
 use std::fs;
 use std::path::{Path, PathBuf};
