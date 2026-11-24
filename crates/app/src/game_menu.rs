@@ -32,6 +32,8 @@ pub struct RunningGame {
     pub executable: Option<std::path::PathBuf>,
     /// Para achar a janela de jogos abertos pela loja.
     pub install_dir: Option<std::path::PathBuf>,
+    /// Quando foi aberto: jogo aberto pela loja fica lembrado um tempo antes de a janela existir.
+    pub launched_at: std::time::Instant,
 }
 
 /// Estado do menu aberto: qual opção está selecionada.

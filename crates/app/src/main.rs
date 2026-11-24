@@ -3,6 +3,8 @@ mod benchmark;
 mod cli;
 mod display_menu;
 mod game_menu;
+mod settings;
+mod settings_menu;
 mod steam_sync;
 mod texture_lru;
 mod window;
@@ -36,6 +38,8 @@ use crate::benchmark::ScrollBenchmarkRecorder;
 use crate::cli::CliArgs;
 use crate::display_menu::{DisplayMenu, RateOption};
 use crate::game_menu::{GameAction, GameMenu, RunningGame};
+use crate::settings::Settings;
+use crate::settings_menu::{SettingsItem, SettingsMenu, SteamPrompt};
 use crate::texture_lru::CoverTextureLru;
 use crate::window::{SelectedMonitorInfo, build_borderless_fullscreen_options};
 
@@ -48,6 +52,8 @@ const TRAILER_FOCUS_DELAY: Duration = Duration::from_millis(450);
 const DEMO_TRAILER_COUNT: usize = 4;
 /// Opacidade do trailer de fundo, para os cards continuarem legíveis.
 const TRAILER_OPACITY: f32 = 0.35;
+/// Quanto tempo um jogo aberto pela loja fica lembrado enquanto a janela dele não aparece.
+const STORE_LAUNCH_GRACE: Duration = Duration::from_secs(60);
 
 actions!(
     bigpicture,
@@ -100,8 +106,15 @@ struct LauncherApp {
     running_game: Option<RunningGame>,
     /// Menu do jogo (Guide com um jogo aberto); enquanto aberto, a navegação vai para ele.
     game_menu: Option<GameMenu>,
-    /// Tela de taxa de atualização (botão Menu).
+    /// Tela de taxa de atualização (pelo menu de configurações).
     display_menu: Option<DisplayMenu>,
+    /// Menu de configurações (botão Menu).
+    settings_menu: Option<SettingsMenu>,
+    /// Pergunta, na primeira vez, se pode ler a biblioteca completa da Steam.
+    steam_prompt: Option<SteamPrompt>,
+    settings: Settings,
+    /// Canal por onde a sincronização da Steam entrega a biblioteca lida.
+    steam_sync_tx: Option<std::sync::mpsc::Sender<Vec<OwnedGame>>>,
 }
 
 /// Opções de inicialização da janela vindas da linha de comando.
@@ -111,6 +124,8 @@ struct LaunchOptions {
     steam: Option<SteamLibrary>,
     other_entries: Vec<CatalogEntry>,
     fallback_demo_len: usize,
+    settings: Settings,
+    steam_sync_tx: Option<std::sync::mpsc::Sender<Vec<OwnedGame>>>,
 }
 
 impl LauncherApp {
@@ -129,6 +144,8 @@ impl LauncherApp {
             steam,
             other_entries,
             fallback_demo_len,
+            settings,
+            steam_sync_tx,
         } = options;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -194,15 +211,22 @@ impl LauncherApp {
         if let Some(library_rx) = channels.steam_library {
             let library_rx = Arc::new(Mutex::new(library_rx));
             cx.spawn_in(window, async move |this, cx| {
-                let rx = Arc::clone(&library_rx);
-                let owned = cx
-                    .background_spawn(async move { rx.lock().ok()?.recv().ok() })
-                    .await;
-                if let Some(owned) = owned {
-                    let _ = this.update_in(cx, |app, _window, cx| {
+                // Uma leitura por sincronização: a da abertura e as que a permissão liga depois.
+                loop {
+                    let rx = Arc::clone(&library_rx);
+                    let owned = cx
+                        .background_spawn(async move { rx.lock().ok()?.recv().ok() })
+                        .await;
+                    let Some(owned) = owned else {
+                        break;
+                    };
+                    let applied = this.update_in(cx, |app, _window, cx| {
                         app.apply_steam_library(&owned, cx);
                         cx.notify();
                     });
+                    if applied.is_err() {
+                        break;
+                    }
                 }
             })
             .detach();
@@ -320,19 +344,75 @@ impl LauncherApp {
             running_game: None,
             game_menu: None,
             display_menu: None,
+            settings_menu: None,
+            steam_prompt: None,
+            settings,
+            steam_sync_tx,
         };
         app.play_focused_trailer();
+        if app.steam.is_some() && !benchmark_scroll {
+            match app.settings.steam_full_library {
+                Some(true) => app.start_steam_sync(),
+                Some(false) => {}
+                None => app.steam_prompt = Some(SteamPrompt::new()),
+            }
+        }
         app
+    }
+
+    /// Começa a ler a biblioteca completa pelo cliente da Steam em segundo plano.
+    fn start_steam_sync(&self) {
+        if let (Some(steam), Some(tx)) = (&self.steam, &self.steam_sync_tx) {
+            steam_sync::spawn(steam.root().to_path_buf(), tx.clone());
+        }
+    }
+
+    fn save_settings(&self) {
+        if let Err(err) = self.settings.save(Path::new(settings::SETTINGS_FILE)) {
+            tracing::warn!(error = %err, "configurações não gravadas");
+        }
+    }
+
+    /// Resposta à pergunta da Steam (ou ligar/desligar pelo menu de configurações).
+    fn set_steam_full_library(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.steam_full_library = Some(enabled);
+        self.save_settings();
+        if enabled {
+            tracing::info!("biblioteca completa da Steam permitida");
+            self.start_steam_sync();
+            return;
+        }
+        tracing::info!("biblioteca completa da Steam desligada");
+        if let Some(steam) = &self.steam {
+            match bigpicture_providers::steam_client::disable_debugger(steam.root()) {
+                Ok(true) => tracing::info!("interface de depuração da Steam desligada (vale a partir da próxima abertura da Steam)"),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(error = %err, "não deu para remover o arquivo da Steam"),
+            }
+        }
+        // Volta para só os jogos instalados.
+        self.apply_steam_entries(None, cx);
     }
 
     /// Troca os cards da Steam pela biblioteca completa lida do cliente, mantendo o foco no
     /// mesmo jogo quando ele continua na grade.
     fn apply_steam_library(&mut self, owned: &[OwnedGame], cx: &mut Context<Self>) {
+        // A leitura pode terminar depois de a pessoa desligar a opção.
+        if self.settings.steam_full_library == Some(true) {
+            self.apply_steam_entries(Some(owned), cx);
+        }
+    }
+
+    /// Remonta os cards da Steam: biblioteca completa (`owned`) ou só os instalados.
+    fn apply_steam_entries(&mut self, owned: Option<&[OwnedGame]>, cx: &mut Context<Self>) {
         let Some(steam) = &self.steam else {
             return;
         };
         let focused_id = self.entries.get(self.focused).map(|e| e.id().clone());
-        let mut entries = steam.entries_with_owned(owned, Path::new(steam_sync::COVER_CACHE));
+        let mut entries = match owned {
+            Some(owned) => steam.entries_with_owned(owned, Path::new(steam_sync::COVER_CACHE)),
+            None => steam.entries(),
+        };
         // As capas demo só estavam na grade por falta de jogos; agora há jogos.
         if !entries.is_empty() && self.fallback_demo_len > 0 {
             let keep = self.other_entries.len().saturating_sub(self.fallback_demo_len);
@@ -344,7 +424,7 @@ impl LauncherApp {
         self.focused = focused_id
             .and_then(|id| entries.iter().position(|e| *e.id() == id))
             .unwrap_or(0);
-        tracing::info!(cards = entries.len(), "grade atualizada com a biblioteca completa da Steam");
+        tracing::info!(cards = entries.len(), full = owned.is_some(), "grade da Steam atualizada");
         self.entries = entries;
         // O card focado pode ter mudado de posição (ou virado outro): leva a grade e o trailer junto.
         if self.focused != previous {
@@ -389,6 +469,27 @@ impl LauncherApp {
 
     /// Aplica um comando de navegação vindo do controle (thread `bp-gamepad`) ou do teclado.
     fn handle_nav(&mut self, cmd: NavCommand, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(prompt) = &mut self.steam_prompt {
+            match cmd {
+                NavCommand::Up | NavCommand::Down | NavCommand::Left | NavCommand::Right => {
+                    if let Some(dir) = cmd.direction() {
+                        prompt.step(dir);
+                    }
+                }
+                NavCommand::Confirm => {
+                    let allow = prompt.allow_selected;
+                    self.steam_prompt = None;
+                    self.set_steam_full_library(allow, cx);
+                }
+                NavCommand::Back => {
+                    self.steam_prompt = None;
+                    self.set_steam_full_library(false, cx);
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if let Some(menu) = &mut self.game_menu {
             match cmd {
                 NavCommand::Up | NavCommand::Down | NavCommand::Left | NavCommand::Right => {
@@ -412,13 +513,43 @@ impl LauncherApp {
             cx.notify();
             return;
         }
+        if let Some(menu) = &mut self.settings_menu
+            && cmd != NavCommand::Guide
+        {
+            match cmd {
+                NavCommand::Up | NavCommand::Down | NavCommand::Left | NavCommand::Right => {
+                    if let Some(dir) = cmd.direction() {
+                        menu.step(dir);
+                    }
+                }
+                NavCommand::Confirm => match menu.selected_item() {
+                    SettingsItem::RefreshRate => {
+                        self.settings_menu = None;
+                        self.open_display_menu();
+                    }
+                    SettingsItem::SteamFullLibrary => {
+                        if self.settings.steam_full_library == Some(true) {
+                            self.set_steam_full_library(false, cx);
+                        } else {
+                            // Ligar passa pela mesma pergunta, com a explicação do risco.
+                            self.settings_menu = None;
+                            self.steam_prompt = Some(SteamPrompt::new());
+                        }
+                    }
+                },
+                NavCommand::Back | NavCommand::Menu => self.settings_menu = None,
+                _ => {}
+            }
+            cx.notify();
+            return;
+        }
         if let Some(dir) = cmd.direction() {
             self.move_focus(dir, cx);
             return;
         }
         match cmd {
             NavCommand::Menu => {
-                self.open_display_menu();
+                self.settings_menu = Some(SettingsMenu::new(self.steam.is_some()));
                 cx.notify();
             }
             NavCommand::Confirm => self.launch_focused(),
@@ -426,6 +557,13 @@ impl LauncherApp {
                 self.bring_launcher_back();
                 if self.running_game.is_some() && !self.game_windows().is_empty() {
                     self.game_menu = Some(GameMenu::default());
+                } else if self
+                    .running_game
+                    .as_ref()
+                    .is_some_and(|game| game.pid == 0 && game.launched_at.elapsed() < STORE_LAUNCH_GRACE)
+                {
+                    // A loja ainda está abrindo o jogo: guarda para o próximo Guide.
+                    tracing::info!("jogo ainda abrindo pela loja; o menu aparece quando a janela existir");
                 } else {
                     self.running_game = None;
                 }
@@ -546,6 +684,59 @@ impl LauncherApp {
             }
         })
         .detach();
+    }
+
+    fn render_settings_menu(&self) -> Option<impl IntoElement + use<>> {
+        let menu = self.settings_menu.as_ref()?;
+        let steam_on = self.settings.steam_full_library == Some(true);
+        let rows = menu.items.iter().enumerate().map(|(ix, item)| {
+            let label = match item {
+                SettingsItem::RefreshRate => "Taxa de atualização do monitor".to_string(),
+                SettingsItem::SteamFullLibrary => format!(
+                    "Biblioteca completa da Steam: {}",
+                    if steam_on { "ligada" } else { "desligada" }
+                ),
+            };
+            modal_button(label, ix == menu.selected).min_w(px(520.))
+        });
+        Some(modal_panel(
+            "CONFIGURAÇÕES".to_string(),
+            "Configurações".to_string(),
+            div().flex().flex_col().gap(px(12.)).children(rows),
+            "A abre · B ou Menu fecha".to_string(),
+        ))
+    }
+
+    fn render_steam_prompt(&self) -> Option<impl IntoElement + use<>> {
+        let prompt = self.steam_prompt?;
+        let body = div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(20.))
+            .max_w(px(760.))
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .text_color(rgb(0xc9d1d9))
+                    .child(
+                        "Para mostrar também os jogos que não estão instalados, o launcher liga a \
+                         interface de depuração da Steam (só neste computador) e lê a biblioteca \
+                         pela Steam aberta. Enquanto ela estiver ligada, outros programas que \
+                         rodam no seu usuário também conseguem usar essa interface. Dá para \
+                         desligar depois em Menu > Configurações.",
+                    ),
+            )
+            .child(div().flex().gap(px(16.)).children([
+                modal_button("Permitir".to_string(), prompt.allow_selected),
+                modal_button("Agora não (só instalados)".to_string(), !prompt.allow_selected),
+            ]));
+        Some(modal_panel(
+            "STEAM".to_string(),
+            "Ler sua biblioteca completa da Steam?".to_string(),
+            body,
+            "A confirma · B = agora não".to_string(),
+        ))
     }
 
     fn render_display_menu(&self) -> Option<impl IntoElement + use<>> {
@@ -769,6 +960,7 @@ impl LauncherApp {
                         title: entry.title().to_string(),
                         executable: entry.executable().cloned(),
                         install_dir: entry.install_dir().cloned(),
+                        launched_at: Instant::now(),
                     });
                 }
                 Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir pela loja"),
@@ -795,6 +987,7 @@ impl LauncherApp {
                     title: entry.title().to_string(),
                     executable: Some(request.executable.clone()),
                     install_dir: entry.install_dir().cloned(),
+                    launched_at: Instant::now(),
                 });
             }
             Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir jogo"),
@@ -1192,9 +1385,61 @@ impl Render for LauncherApp {
                     .child(Scrollbar::vertical(&self.scroll_handle)),
             )
             .children(self.render_display_menu())
+            .children(self.render_settings_menu())
+            .children(self.render_steam_prompt())
             .children(self.render_game_menu())
             .child(fps_monitor(window, cx))
     }
+}
+
+/// Botão de um painel modal (menus e perguntas), destacado quando selecionado.
+fn modal_button(label: String, selected: bool) -> Div {
+    div()
+        .px(px(24.))
+        .py(px(12.))
+        .rounded(px(10.))
+        .text_size(px(20.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .border_2()
+        .border_color(if selected { rgb(0x58a6ff) } else { rgb(0x30363d) })
+        .bg(if selected { rgb(0x1f3a5f) } else { rgb(0x161b22) })
+        .text_color(rgb(0xf0f6fc))
+        .child(label)
+}
+
+/// Painel modal centralizado sobre a grade escurecida.
+fn modal_panel(kicker: String, heading: String, body: impl IntoElement, hint: String) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(hsla(0.0, 0.0, 0.0, 0.6))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(24.))
+                .p(px(40.))
+                .rounded(px(16.))
+                .bg(rgb(0x0d1117))
+                .border_1()
+                .border_color(rgb(0x30363d))
+                .child(div().text_size(px(14.)).text_color(rgb(0x8b949e)).child(kicker))
+                .child(
+                    div()
+                        .text_size(px(28.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xf0f6fc))
+                        .child(heading),
+                )
+                .child(body)
+                .child(div().text_size(px(13.)).text_color(rgb(0x8b949e)).child(hint)),
+        )
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1238,16 +1483,19 @@ fn main() -> anyhow::Result<()> {
     let mut fallback_demo_len = 0;
     let steam = (!cli.benchmark_scroll()).then(SteamLibrary::detect).flatten();
     let (library_tx, library_rx) = std::sync::mpsc::channel();
+    let settings = Settings::load(Path::new(settings::SETTINGS_FILE));
     if !cli.benchmark_scroll() {
         if let Some(steam) = &steam {
-            // A última biblioteca completa (cache) aparece na hora; a leitura do cliente atualiza
-            // a grade quando termina.
-            match steam_sync::load_cached() {
+            // Com a biblioteca completa permitida, a última lida (cache) aparece na hora e a
+            // janela dispara a leitura do cliente; sem permissão, só os jogos instalados.
+            let cached = (settings.steam_full_library == Some(true))
+                .then(steam_sync::load_cached)
+                .flatten();
+            match cached {
                 Some(owned) => entries.extend(steam.entries_with_owned(&owned, Path::new(steam_sync::COVER_CACHE))),
                 None => entries.extend(steam.entries()),
             }
             steam_entries_len = entries.len();
-            steam_sync::spawn(steam.root().to_path_buf(), library_tx);
         }
         if let Some(epic) = EpicLibrary::detect() {
             entries.extend(epic.entries());
@@ -1285,7 +1533,9 @@ fn main() -> anyhow::Result<()> {
         demo_launch: cli.demo_launch().map(Path::to_path_buf),
         other_entries: entries[steam_entries_len..].to_vec(),
         fallback_demo_len,
+        steam_sync_tx: steam.is_some().then_some(library_tx),
         steam,
+        settings,
     };
 
     let (nav_tx, nav_rx) = std::sync::mpsc::channel();

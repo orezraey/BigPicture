@@ -65,6 +65,16 @@ pub fn enable_debugger(steam_root: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Remove o [`FLAG_FILE`]: a Steam deixa de abrir a interface a partir da próxima abertura.
+/// `Ok(true)` se havia arquivo para remover.
+pub fn disable_debugger(steam_root: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(steam_root.join(FLAG_FILE)) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
 /// Procura a interface na porta do launcher e na padrão, confirmando que quem responde é o
 /// cliente da Steam (outro programa na mesma porta é ignorado).
 pub fn find_debugger(steam_running: bool) -> ClientStatus {
@@ -351,6 +361,9 @@ mod tests {
         assert!(enable_debugger(&dir).unwrap());
         assert!(!enable_debugger(&dir).unwrap());
         assert!(dir.join(FLAG_FILE).is_file());
+        assert!(disable_debugger(&dir).unwrap());
+        assert!(!disable_debugger(&dir).unwrap());
+        assert!(!dir.join(FLAG_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!is_steam_debugger(9));
         assert_eq!(
