@@ -50,8 +50,10 @@ impl EpicLibrary {
             .filter(|p| p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("item")))
             .filter_map(|p| read_manifest(&p))
             .collect();
-        games.sort_by_key(|g| g.name.to_lowercase());
+        // `dedup` só junta vizinhos: agrupa por AppName antes de ordenar pelo nome.
+        games.sort_by(|a, b| a.app_name.cmp(&b.app_name));
         games.dedup_by(|a, b| a.app_name == b.app_name);
+        games.sort_by_key(|g| g.name.to_lowercase());
         games
     }
 }

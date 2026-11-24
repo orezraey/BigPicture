@@ -109,8 +109,11 @@ impl SteamLibrary {
                 }
             }
         }
-        games.sort_by_key(|g| g.name.to_lowercase());
+        // `dedup` só junta vizinhos: agrupa por appid (a biblioteca principal vem primeiro e a
+        // ordenação é estável) antes de ordenar pelo nome.
+        games.sort_by_key(|g| g.app_id);
         games.dedup_by_key(|g| g.app_id);
+        games.sort_by_key(|g| g.name.to_lowercase());
         games
     }
 
@@ -174,9 +177,13 @@ impl SteamLibrary {
         let installed = self.installed_games();
         let mut entries: Vec<(bool, CatalogEntry)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for game in owned.iter().filter(|g| !g.hidden) {
-            let local = installed.iter().find(|i| i.app_id == game.app_id);
+        for game in owned {
+            // Ocultos também entram em `seen`, para não voltarem pelos instalados abaixo.
             seen.insert(game.app_id);
+            if game.hidden {
+                continue;
+            }
+            let local = installed.iter().find(|i| i.app_id == game.app_id);
             let subtitle = match (local.is_some(), game.family_owner.is_some()) {
                 (true, false) => "Steam",
                 (true, true) => "Steam · Família",
@@ -349,18 +356,60 @@ fn registry_auto_login_user() -> Option<String> {
 }
 
 /// Lê `HKCU\Software\Valve\Steam\<name>` com o `reg.exe` do sistema, sem dependência extra.
+/// Usa `reg export` (arquivo UTF-16) e não `reg query`, cuja saída vem na página de código OEM
+/// e estraga caminhos com acentos (`C:\Users\Cauã\...`).
 #[cfg(windows)]
 fn registry_value(name: &str) -> Option<String> {
-    let out = std::process::Command::new("reg")
-        .args(["query", r"HKCU\Software\Valve\Steam", "/v", name])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .find(|l| l.trim_start().starts_with(name))
-        .and_then(|l| l.split("REG_SZ").nth(1))
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    let file = std::env::temp_dir().join(format!("bp_steam_reg_{}_{name}.reg", std::process::id()));
+    let status = std::process::Command::new("reg")
+        .args(["export", r"HKCU\Software\Valve\Steam"])
+        .arg(&file)
+        .arg("/y")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let bytes = fs::read(&file);
+    let _ = fs::remove_file(&file);
+    if !status.ok()?.success() {
+        return None;
+    }
+    parse_reg_export(&decode_utf16le(&bytes.ok()?), name)
+}
+
+#[cfg(any(windows, test))]
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
+    String::from_utf16_lossy(&units).trim_start_matches('\u{feff}').to_string()
+}
+
+/// Valor texto (`"nome"="valor"`) da primeira chave de um arquivo `.reg`.
+#[cfg(any(windows, test))]
+fn parse_reg_export(text: &str, name: &str) -> Option<String> {
+    let prefix = format!("\"{name}\"=\"");
+    let mut sections = 0;
+    for line in text.lines() {
+        if line.starts_with('[') {
+            sections += 1;
+            if sections > 1 {
+                break;
+            }
+            continue;
+        }
+        let Some(raw) = line.strip_prefix(&prefix).and_then(|r| r.strip_suffix('"')) else {
+            continue;
+        };
+        let mut value = String::new();
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                value.extend(chars.next());
+            } else {
+                value.push(c);
+            }
+        }
+        return Some(value).filter(|v| !v.is_empty());
+    }
+    None
 }
 
 #[cfg(test)]
@@ -451,7 +500,23 @@ mod tests {
         );
         assert!(full[3].cover_path().unwrap().starts_with(root.join("cdn")));
         assert!(full[1].cover_url().is_none(), "capa local tem preferência");
+        // Jogo instalado e oculto na Steam também fica de fora.
+        let hidden_installed = steam.entries_with_owned(&[owned(1903340, "Clair Obscur", true, None)], &root.join("cdn"));
+        let titles: Vec<&str> = hidden_installed.iter().map(CatalogEntry::title).collect();
+        assert_eq!(titles, ["Cookie Clicker"]);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reads_string_value_from_reg_export_with_accents_and_escapes() {
+        let text = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Valve\\Steam]\r\n\
+            \"SteamExe\"=\"c:/x/steam.exe\"\r\n\"SteamPath\"=\"c:/users/cauã/steam \\\"x\\\"\"\r\n\"Rate\"=dword:00000001\r\n\r\n\
+            [HKEY_CURRENT_USER\\Software\\Valve\\Steam\\Apps]\r\n\"AutoLoginUser\"=\"outra\"\r\n";
+        let utf16: Vec<u8> = "\u{feff}".chars().chain(text.chars()).collect::<String>().encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let decoded = decode_utf16le(&utf16);
+        assert_eq!(parse_reg_export(&decoded, "SteamPath").as_deref(), Some("c:/users/cauã/steam \"x\""));
+        assert_eq!(parse_reg_export(&decoded, "Rate"), None);
+        assert_eq!(parse_reg_export(&decoded, "AutoLoginUser"), None, "só a primeira chave");
     }
 
     fn block(pairs: Vec<(&str, Kv)>) -> Kv {

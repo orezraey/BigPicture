@@ -125,7 +125,11 @@ impl Drop for CoverLoader {
 /// Baixa `url` para `dest` (gravando num temporário e renomeando no fim).
 fn download(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::Context as _;
+    // Sem prazo o ureq espera para sempre, e uma conexão parada prenderia a thread de capas.
     let bytes = ureq::get(url)
+        .config()
+        .timeout_global(Some(std::time::Duration::from_secs(20)))
+        .build()
         .call()
         .with_context(|| format!("baixando {url}"))?
         .body_mut()
@@ -172,6 +176,11 @@ fn worker_loop(
             _ => Ok(()),
         }
         .and_then(|()| cache.load_or_decode(&job.source_path));
+        if result.is_err() && job.url.is_some() {
+            // Arquivo baixado que não decodifica: apaga para baixar de novo na próxima execução,
+            // em vez de ficar sem capa para sempre.
+            let _ = std::fs::remove_file(&job.source_path);
+        }
 
         if let Ok(mut state) = lock.lock() {
             state.in_flight.remove(&job.id);

@@ -81,6 +81,9 @@ struct LauncherApp {
     steam: Option<SteamLibrary>,
     /// Cards que vêm depois dos da Steam (Epic, apps instalados, demo).
     other_entries: Vec<CatalogEntry>,
+    /// Quantos cards demo estão no fim de `other_entries` só porque não havia jogo na abertura;
+    /// saem quando a biblioteca completa da Steam chega com jogos.
+    fallback_demo_len: usize,
     /// Trailer do card focado tocando no fundo.
     backdrop: TrailerBackdrop,
     /// Desligado no `--benchmark-scroll`, para não mexer nos números de frame.
@@ -107,6 +110,7 @@ struct LaunchOptions {
     demo_launch: Option<PathBuf>,
     steam: Option<SteamLibrary>,
     other_entries: Vec<CatalogEntry>,
+    fallback_demo_len: usize,
 }
 
 impl LauncherApp {
@@ -124,6 +128,7 @@ impl LauncherApp {
             demo_launch,
             steam,
             other_entries,
+            fallback_demo_len,
         } = options;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
@@ -195,7 +200,7 @@ impl LauncherApp {
                     .await;
                 if let Some(owned) = owned {
                     let _ = this.update_in(cx, |app, _window, cx| {
-                        app.apply_steam_library(&owned);
+                        app.apply_steam_library(&owned, cx);
                         cx.notify();
                     });
                 }
@@ -305,6 +310,7 @@ impl LauncherApp {
             focused: 0,
             steam,
             other_entries,
+            fallback_demo_len,
             backdrop,
             trailers_enabled: !benchmark_scroll,
             focus_generation: 0,
@@ -321,18 +327,32 @@ impl LauncherApp {
 
     /// Troca os cards da Steam pela biblioteca completa lida do cliente, mantendo o foco no
     /// mesmo jogo quando ele continua na grade.
-    fn apply_steam_library(&mut self, owned: &[OwnedGame]) {
+    fn apply_steam_library(&mut self, owned: &[OwnedGame], cx: &mut Context<Self>) {
         let Some(steam) = &self.steam else {
             return;
         };
         let focused_id = self.entries.get(self.focused).map(|e| e.id().clone());
         let mut entries = steam.entries_with_owned(owned, Path::new(steam_sync::COVER_CACHE));
+        // As capas demo só estavam na grade por falta de jogos; agora há jogos.
+        if !entries.is_empty() && self.fallback_demo_len > 0 {
+            let keep = self.other_entries.len().saturating_sub(self.fallback_demo_len);
+            self.other_entries.truncate(keep);
+            self.fallback_demo_len = 0;
+        }
         entries.extend(self.other_entries.iter().cloned());
+        let previous = self.focused;
         self.focused = focused_id
             .and_then(|id| entries.iter().position(|e| *e.id() == id))
             .unwrap_or(0);
         tracing::info!(cards = entries.len(), "grade atualizada com a biblioteca completa da Steam");
         self.entries = entries;
+        // O card focado pode ter mudado de posição (ou virado outro): leva a grade e o trailer junto.
+        if self.focused != previous {
+            let columns = self.cached_row_sizes.0.max(1);
+            self.scroll_handle
+                .scroll_to_item(self.focused / columns, ScrollStrategy::Center);
+        }
+        self.schedule_trailer(cx);
     }
 
     /// Toca o trailer do card focado (ou para o fundo, se ele não tiver trailer).
@@ -1215,6 +1235,7 @@ fn main() -> anyhow::Result<()> {
     // --demo-catalog).
     let mut entries = Vec::new();
     let mut steam_entries_len = 0;
+    let mut fallback_demo_len = 0;
     let steam = (!cli.benchmark_scroll()).then(SteamLibrary::detect).flatten();
     let (library_tx, library_rx) = std::sync::mpsc::channel();
     if !cli.benchmark_scroll() {
@@ -1243,7 +1264,11 @@ fn main() -> anyhow::Result<()> {
             });
         }
         if !games_found || cli.demo_catalog() {
+            let before = entries.len();
             entries.extend(provider.entries());
+            if !games_found && !cli.demo_catalog() {
+                fallback_demo_len = entries.len() - before;
+            }
         }
     } else {
         entries.extend(provider.entries());
@@ -1259,6 +1284,7 @@ fn main() -> anyhow::Result<()> {
         benchmark_scroll: cli.benchmark_scroll(),
         demo_launch: cli.demo_launch().map(Path::to_path_buf),
         other_entries: entries[steam_entries_len..].to_vec(),
+        fallback_demo_len,
         steam,
     };
 

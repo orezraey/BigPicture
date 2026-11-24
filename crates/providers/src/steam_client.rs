@@ -86,12 +86,20 @@ fn is_steam_debugger(port: u16) -> bool {
 /// Lê a biblioteca do cliente na porta `port`, esperando até `wait` o cliente terminar de
 /// carregá-la (logo depois de abrir, a lista ainda está vazia).
 pub fn read_library(port: u16, wait: Duration) -> Result<Vec<OwnedGame>, String> {
-    let ws_url = shared_context_url(port)?;
+    let started = Instant::now();
+    // Logo depois de abrir, a interface já responde mas o contexto compartilhado ainda não
+    // existe: tenta de novo até `wait`.
+    let ws_url = loop {
+        match shared_context_url(port) {
+            Ok(url) => break url,
+            Err(err) if started.elapsed() >= wait => return Err(err),
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    };
     let (mut socket, _) = tungstenite::connect(&ws_url).map_err(|e| format!("WebSocket {ws_url}: {e}"))?;
     if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_ref() {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
     }
-    let started = Instant::now();
     let mut next_id = 1u64;
     loop {
         let loaded = evaluate(&mut socket, &mut next_id, LOADED_JS)?;
@@ -110,9 +118,9 @@ pub fn read_library(port: u16, wait: Duration) -> Result<Vec<OwnedGame>, String>
     Ok(parse_library(&list))
 }
 
-const LOADED_JS: &str = "(typeof appStore !== 'undefined') && \
-    (typeof appStore.m_bIsInitialized === 'boolean' ? appStore.m_bIsInitialized : appStore.allApps.length > 0) && \
-    appStore.allApps.length > 0";
+/// Sem lançar exceção enquanto `appStore` ou `allApps` ainda não existem.
+const LOADED_JS: &str = "(typeof appStore !== 'undefined') && !!appStore.allApps && \
+    appStore.allApps.length > 0 && appStore.m_bIsInitialized !== false";
 
 /// Só jogos (`app_type === 1`), sem atalhos de não-Steam nem demos.
 const LIBRARY_JS: &str = r#"(() => {
@@ -156,8 +164,10 @@ pub fn parse_library(list: &Value) -> Vec<OwnedGame> {
         })
         .filter(|g| !g.name.is_empty())
         .collect();
-    games.sort_by_key(|g| g.name.to_lowercase());
+    // `dedup` só junta vizinhos: agrupa por appid antes de ordenar pelo nome.
+    games.sort_by_key(|g| g.app_id);
     games.dedup_by_key(|g| g.app_id);
+    games.sort_by_key(|g| g.name.to_lowercase());
     games
 }
 
