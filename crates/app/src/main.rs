@@ -115,6 +115,9 @@ struct LauncherApp {
     settings: Settings,
     /// Canal por onde a sincronização da Steam entrega a biblioteca lida.
     steam_sync_tx: Option<std::sync::mpsc::Sender<Vec<OwnedGame>>>,
+    /// O mouse foi usado por último (mostra o hover dos cards); falso depois de navegar pelo
+    /// controle ou teclado.
+    pointer_active: bool,
 }
 
 /// Opções de inicialização da janela vindas da linha de comando.
@@ -147,6 +150,15 @@ impl LauncherApp {
             settings,
             steam_sync_tx,
         } = options;
+        // Capas na memória no tamanho em que o card as mostra (pixels físicos), não em 600×900.
+        {
+            let metrics = GridMetrics::default();
+            let scale = window.scale_factor();
+            cover_loader.set_output_size(
+                (metrics.card_width * scale).round() as u32,
+                (metrics.cover_height * scale).round() as u32,
+            );
+        }
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -348,6 +360,7 @@ impl LauncherApp {
             steam_prompt: None,
             settings,
             steam_sync_tx,
+            pointer_active: true,
         };
         app.play_focused_trailer();
         if app.steam.is_some() && !benchmark_scroll {
@@ -469,6 +482,12 @@ impl LauncherApp {
 
     /// Aplica um comando de navegação vindo do controle (thread `bp-gamepad`) ou do teclado.
     fn handle_nav(&mut self, cmd: NavCommand, _window: &mut Window, cx: &mut Context<Self>) {
+        // Navegando por controle ou teclado: some o cursor e o destaque de hover, até o mouse mexer.
+        if self.pointer_active {
+            self.pointer_active = false;
+            cx.notify();
+        }
+        bigpicture_system::hide_cursor_until_mouse_moves();
         if let Some(prompt) = &mut self.steam_prompt {
             match cmd {
                 NavCommand::Up | NavCommand::Down | NavCommand::Left | NavCommand::Right => {
@@ -1171,10 +1190,14 @@ impl LauncherApp {
                     .border_color(rgb(0x58a6ff))
                     .bg(rgb(0x1b2434))
             })
-            .hover(|style| {
-                style
-                    .border_color(rgb(0x58a6ff))
-                    .bg(rgb(0x1b2434))
+            // Hover só enquanto o mouse está em uso: com o cursor escondido (navegação por
+            // controle), o card sob ele não deve parecer focado.
+            .when(self.pointer_active, |card| {
+                card.hover(|style| {
+                    style
+                        .border_color(rgb(0x58a6ff))
+                        .bg(rgb(0x1b2434))
+                })
             })
             .child(cover_surface)
             .child(
@@ -1347,6 +1370,12 @@ impl Render for LauncherApp {
             .id("launcher-root")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_mouse_move(cx.listener(|app, _: &MouseMoveEvent, _window, cx| {
+                if !app.pointer_active {
+                    app.pointer_active = true;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_nav_up))
             .on_action(cx.listener(Self::on_nav_down))

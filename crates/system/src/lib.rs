@@ -252,6 +252,15 @@ impl SystemControl for UnsupportedSystem {
     }
 }
 
+/// Esconde o cursor do mouse até ele se mexer de novo (como a navegação por controle de um
+/// console). Deve ser chamada na thread da janela. No Windows, a janela restaura o cursor sozinha
+/// na próxima mensagem `WM_SETCURSOR`, que chega quando o mouse se mexe; nas outras plataformas,
+/// por enquanto, não faz nada.
+pub fn hide_cursor_until_mouse_moves() {
+    #[cfg(windows)]
+    win32::hide_cursor();
+}
+
 /// Abre um endereço pelo programa registrado no sistema (`steam://…`, `com.epicgames.launcher://…`).
 /// O launcher da loja é quem abre o jogo, então não há pid do jogo para devolver.
 pub fn open_uri(uri: &str) -> Result<()> {

@@ -21,7 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, PostMessageW, SW_MINIMIZE, WM_CLOSE, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    IsIconic, IsWindowVisible, PostMessageW, SetCursor, SW_MINIMIZE, WM_CLOSE, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -320,6 +320,11 @@ fn process_image(pid: u32) -> Option<PathBuf> {
 fn normalize_path(path: &Path) -> String {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     path.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase()
+}
+
+pub(crate) fn hide_cursor() {
+    // SAFETY: sem ponteiros; `None` só tira a imagem do cursor até o próximo `SetCursor`.
+    let _ = unsafe { SetCursor(None) };
 }
 
 fn is_foreground(window: WindowId) -> bool {

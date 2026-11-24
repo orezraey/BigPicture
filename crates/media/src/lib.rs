@@ -53,6 +53,17 @@ impl RgbaFrame {
 
     /// Consumes the RGBA8 frame and converts channels in-place to BGRA8
     /// (the pixel layout expected by GPUI's `RenderImage`).
+    /// Cópia redimensionada (filtro triangular: bom para reduzir, rápido o bastante para as
+    /// threads de capa). `None` se o tamanho pedido for zero.
+    pub fn resized(&self, width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let image = image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())?;
+        let small = image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle);
+        Self::new(width, height, small.into_raw())
+    }
+
     pub fn into_bgra_bytes(mut self) -> Vec<u8> {
         for px in self.pixels.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
@@ -77,6 +88,15 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn resizes_frames_down_and_rejects_zero_size() {
+        let frame = RgbaFrame::new(4, 6, vec![200; 4 * 6 * 4]).unwrap();
+        let small = frame.resized(2, 3).unwrap();
+        assert_eq!((small.width(), small.height(), small.pixels().len()), (2, 3, 2 * 3 * 4));
+        assert!(small.pixels().iter().all(|&b| b == 200));
+        assert!(frame.resized(0, 3).is_none());
     }
 
     #[test]

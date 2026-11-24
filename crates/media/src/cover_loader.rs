@@ -1,6 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -38,6 +39,8 @@ struct QueueState {
 pub struct CoverLoader {
     shared: Arc<(Mutex<QueueState>, Condvar)>,
     workers: Vec<JoinHandle<()>>,
+    /// Tamanho entregue à UI (largura << 32 | altura); 0 = 600×900 do cache.
+    output_size: Arc<AtomicU64>,
 }
 
 impl CoverLoader {
@@ -53,6 +56,7 @@ impl CoverLoader {
             Condvar::new(),
         ));
 
+        let output_size = Arc::new(AtomicU64::new(0));
         let threads = worker_count.max(1);
         let mut workers = Vec::with_capacity(threads);
 
@@ -60,15 +64,35 @@ impl CoverLoader {
             let shared_ref = Arc::clone(&shared);
             let cache_ref = cache.clone();
             let tx_ref: Sender<CoverLoaded> = tx.clone();
+            let size_ref = Arc::clone(&output_size);
 
             let handle = thread::Builder::new()
                 .name(format!("bp-cover-worker-{ix}"))
-                .spawn(move || worker_loop(shared_ref, cache_ref, tx_ref))
+                .spawn(move || worker_loop(shared_ref, cache_ref, tx_ref, size_ref))
                 .expect("failed to spawn cover worker thread");
             workers.push(handle);
         }
 
-        (Self { shared, workers }, rx)
+        (
+            Self {
+                shared,
+                workers,
+                output_size,
+            },
+            rx,
+        )
+    }
+
+    /// Entrega as capas já reduzidas para `width`×`height` (o tamanho em que o card as mostra,
+    /// em pixels físicos). O cache em disco continua em 600×900; só a cópia em memória encolhe,
+    /// e cada capa ocupa uma fração dos 2,1 MB do tamanho cheio.
+    pub fn set_output_size(&self, width: u32, height: u32) {
+        let packed = if width == 0 || height == 0 {
+            0
+        } else {
+            (u64::from(width) << 32) | u64::from(height)
+        };
+        self.output_size.store(packed, Ordering::Relaxed);
     }
 
     /// Enqueues a cover for off-thread decoding/caching if it is not already in flight.
@@ -144,10 +168,20 @@ fn download(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reduz o frame para o tamanho combinado (`w << 32 | h`), sem nunca ampliar.
+fn fit_output(frame: RgbaFrame, packed: u64) -> RgbaFrame {
+    let (w, h) = ((packed >> 32) as u32, packed as u32);
+    if packed == 0 || (w >= frame.width() && h >= frame.height()) {
+        return frame;
+    }
+    frame.resized(w, h).unwrap_or(frame)
+}
+
 fn worker_loop(
     shared: Arc<(Mutex<QueueState>, Condvar)>,
     cache: CoverCache,
     tx: Sender<CoverLoaded>,
+    output_size: Arc<AtomicU64>,
 ) {
     let (lock, cvar) = &*shared;
     loop {
@@ -194,7 +228,7 @@ fn worker_loop(
                 if tx
                     .send(CoverLoaded {
                         id: job.id,
-                        frame,
+                        frame: fit_output(frame, output_size.load(Ordering::Relaxed)),
                         outcome,
                     })
                     .is_err()
