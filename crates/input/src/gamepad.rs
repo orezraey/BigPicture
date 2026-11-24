@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use gilrs::{Axis, Button, EventType, Gilrs};
 
 use crate::NavCommand;
-use crate::guide::GuidePoller;
+use crate::guide::{GuideChord, GuidePoller};
 use crate::repeat::NavRepeater;
 use crate::stick::{StickEdge, StickState};
 
@@ -57,6 +57,7 @@ fn run(gilrs: &mut Gilrs, tx: &Sender<NavCommand>) -> Result<(), SendError<NavCo
     let mut repeat = NavRepeater::new();
     let mut stick = StickState::new();
     let mut guide = GuidePoller::new();
+    let mut chord = GuideChord::default();
     loop {
         if guide.poll() {
             tx.send(NavCommand::Guide)?;
@@ -65,6 +66,11 @@ fn run(gilrs: &mut Gilrs, tx: &Sender<NavCommand>) -> Result<(), SendError<NavCo
         if let Some(ev) = gilrs.next_event_blocking(Some(wait)) {
             let now = Instant::now();
             match ev.event {
+                EventType::ButtonPressed(Button::Select, _) => chord.view(true),
+                EventType::ButtonReleased(Button::Select, _) => chord.view(false),
+                EventType::ButtonPressed(Button::Start, _) if chord.menu_pressed() => {
+                    tx.send(NavCommand::Guide)?;
+                }
                 EventType::ButtonPressed(button, _) => {
                     if let Some(cmd) = button_command(button) {
                         tx.send(repeat.press(cmd, now))?;

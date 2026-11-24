@@ -20,6 +20,24 @@ impl GuideEdges {
     }
 }
 
+/// Atalho alternativo ao Guide: segurar View (`Select`) e apertar Menu (`Start`). Serve quando o
+/// Windows reserva o botão Guide para a Xbox Game Bar.
+#[derive(Debug, Default)]
+pub struct GuideChord {
+    view_held: bool,
+}
+
+impl GuideChord {
+    pub fn view(&mut self, pressed: bool) {
+        self.view_held = pressed;
+    }
+
+    /// Menu foi apertado: `true` se, com View segurado, ele vale como Guide (e não como Menu).
+    pub fn menu_pressed(&self) -> bool {
+        self.view_held
+    }
+}
+
 #[cfg(windows)]
 pub struct GuidePoller {
     handle: Option<rusty_xinput::XInputHandle>,
@@ -83,5 +101,15 @@ mod tests {
         assert!(e.update(0, true));
         assert!(e.update(1, true), "controles independentes");
         assert!(!e.update(9, true), "slot inexistente é ignorado");
+    }
+
+    #[test]
+    fn view_plus_menu_is_guide_only_while_view_is_held() {
+        let mut chord = GuideChord::default();
+        assert!(!chord.menu_pressed());
+        chord.view(true);
+        assert!(chord.menu_pressed());
+        chord.view(false);
+        assert!(!chord.menu_pressed());
     }
 }
