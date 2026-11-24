@@ -1,0 +1,33 @@
+# Spike isolado: grade de 1.000 capas 600x900 em Rune (anomalyco/rune), para comparar com o GPUI.
+# Tem workspace próprio de propósito: não faz parte do workspace do BigPicture, não altera o
+# Cargo.lock raiz nem o CI. Rode a partir desta pasta.
+[workspace]
+
+[package]
+name = "rune-grid"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# Rune não tem release nem branch `main`: a única branch é `dev` (o README pede para fixar uma rev dela).
+rune = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+bigpicture-core = { path = "../../crates/core" }
+bigpicture-media = { path = "../../crates/media" }
+bigpicture-providers = { path = "../../crates/providers" }
+anyhow = "1"
+
+# O workspace do Rune corrige crates publicados (vendor/*). `[patch]` de uma dependência não se
+# propaga, então quem usa Rune precisa repetir os patches (README do Rune, Cargo.toml raiz).
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "a1cfa9cda205779b0fca400ec67f1ea55e70d532" }
+
+# Mesmo perfil de release do workspace do BigPicture.
+[profile.release]
+strip = "symbols"
