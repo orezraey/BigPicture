@@ -182,7 +182,14 @@ impl LauncherApp {
                         break;
                     };
                     if this
-                        .update_in(cx, |app, window, cx| app.handle_nav(cmd, window, cx))
+                        .update_in(cx, |app, window, cx| {
+                            // O XInput entrega o controle mesmo com outra janela na frente: com um
+                            // jogo (ou outro app) em primeiro plano, só o Guide é do launcher.
+                            if !gamepad_command_allowed(cmd, window.is_window_active()) {
+                                return;
+                            }
+                            app.handle_nav(cmd, window, cx)
+                        })
                         .is_err()
                     {
                         break;
@@ -506,6 +513,11 @@ impl LauncherApp {
                     self.steam_prompt = None;
                     self.set_steam_full_library(false, cx);
                 }
+                // Com o launcher atrás de outra janela, o Guide é o único comando que chega:
+                // traz a pergunta para a frente em vez de engoli-lo.
+                NavCommand::Guide => {
+                    self.bring_launcher_back();
+                }
                 _ => {}
             }
             cx.notify();
@@ -521,6 +533,11 @@ impl LauncherApp {
                 NavCommand::Confirm => {
                     let action = menu.selected();
                     self.run_game_action(action);
+                }
+                // Menu aberto mas o jogo voltou para a frente (Alt+Tab, clique): o Guide traz o
+                // menu de volta, em vez de "voltar ao jogo" que já está na frente.
+                NavCommand::Guide if !window.is_window_active() => {
+                    self.bring_launcher_back();
                 }
                 NavCommand::Guide => self.run_game_action(GameAction::Resume),
                 NavCommand::Back => self.game_menu = None,
@@ -575,7 +592,12 @@ impl LauncherApp {
             }
             NavCommand::Confirm => self.launch_focused(),
             NavCommand::Guide => {
-                self.bring_launcher_back();
+                // Se o Windows não deixou o launcher vir para a frente, abrir o menu atrás do jogo
+                // só criaria um menu invisível (e inalcançável, já que só o Guide passa).
+                if !self.bring_launcher_back() {
+                    cx.notify();
+                    return;
+                }
                 if self.running_game.is_some() && !self.game_windows().is_empty() {
                     self.game_menu = Some(GameMenu::default());
                 } else if self
@@ -1016,7 +1038,9 @@ impl LauncherApp {
     }
 
     /// Guide: traz o launcher de volta para a frente, mesmo com um jogo em primeiro plano.
-    fn bring_launcher_back(&mut self) {
+    /// Retorna se ele está na frente agora. No Linux ainda não há como (`bring_launcher_to_front`
+    /// responde não suportado), então lá é preciso voltar com o mouse.
+    fn bring_launcher_back(&mut self) -> bool {
         let window = match self.launcher_window {
             Some(window) => window,
             None => match self.system.windows_of_process(std::process::id()) {
@@ -1026,17 +1050,23 @@ impl LauncherApp {
                 }
                 Ok(_) => {
                     tracing::warn!("janela do launcher não encontrada");
-                    return;
+                    return false;
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, "não deu para achar a janela do launcher");
-                    return;
+                    return false;
                 }
             },
         };
         match self.system.bring_launcher_to_front(window) {
-            Ok(()) => tracing::info!("launcher trazido para a frente"),
-            Err(err) => tracing::warn!(error = %err, "launcher não veio para a frente"),
+            Ok(()) => {
+                tracing::info!("launcher trazido para a frente");
+                true
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "launcher não veio para a frente");
+                false
+            }
         }
     }
 
@@ -1455,6 +1485,12 @@ impl Render for LauncherApp {
     }
 }
 
+/// Se um comando do controle deve chegar ao launcher. Em segundo plano (um jogo na frente),
+/// só o Guide, que traz o launcher de volta; o resto é do jogo.
+fn gamepad_command_allowed(cmd: NavCommand, launcher_active: bool) -> bool {
+    launcher_active || cmd == NavCommand::Guide
+}
+
 /// Botão de um painel modal (menus e perguntas), destacado quando selecionado.
 fn modal_button(label: String, selected: bool) -> Div {
     div()
@@ -1677,4 +1713,19 @@ fn main() -> anyhow::Result<()> {
         });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    // Sem `use super::*`: o `gpui_kit::*` traz um atributo `test` que tomaria o lugar do padrão.
+    use super::{NavCommand, gamepad_command_allowed};
+
+    #[test]
+    fn only_guide_reaches_the_launcher_in_the_background() {
+        assert!(gamepad_command_allowed(NavCommand::Confirm, true));
+        assert!(gamepad_command_allowed(NavCommand::Guide, false));
+        for cmd in [NavCommand::Confirm, NavCommand::Back, NavCommand::Menu, NavCommand::Down] {
+            assert!(!gamepad_command_allowed(cmd, false), "{cmd:?} em segundo plano");
+        }
+    }
 }
