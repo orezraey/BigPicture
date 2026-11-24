@@ -8,7 +8,7 @@ pub mod trailer;
 
 pub use cover_cache::{CacheOutcome, CoverCache};
 pub use cover_loader::{CoverLoaded, CoverLoader};
-pub use demo_covers::{ensure_demo_covers, list_image_files};
+pub use demo_covers::{ensure_demo_covers, ensure_telegram_cover, list_image_files};
 pub use demo_trailers::{ensure_demo_trailers, list_trailer_files};
 pub use trailer::{TrailerPlayer, init_gstreamer};
 

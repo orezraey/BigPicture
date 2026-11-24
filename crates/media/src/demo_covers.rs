@@ -59,6 +59,57 @@ pub fn ensure_demo_covers(dir: &Path, target_count: usize) -> Result<Vec<PathBuf
     Ok(all)
 }
 
+/// Gera (uma vez) a capa do card do Telegram: degradê azul com um círculo branco e um avião
+/// de papel, no tamanho final 600×900. Fica fora da pasta de capas demo para não entrar no ciclo
+/// das 1.000 capas.
+pub fn ensure_telegram_cover(dest: &Path) -> Result<PathBuf> {
+    if !dest.is_file() {
+        if let Some(dir) = dest.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("criando {}", dir.display()))?;
+        }
+        render_telegram_cover()
+            .save_with_format(dest, ImageFormat::Png)
+            .with_context(|| format!("gravando {}", dest.display()))?;
+    }
+    Ok(dest.to_path_buf())
+}
+
+fn render_telegram_cover() -> RgbaImage {
+    const W: u32 = 600;
+    const H: u32 = 900;
+    let top = [0x37u8, 0xae, 0xe2];
+    let bottom = [0x1e, 0x6f, 0xa8];
+    let (cx, cy, radius) = (300.0f32, 420.0f32, 170.0f32);
+    // Avião de papel: triângulo apontando para a direita, dentro do círculo.
+    let tri = [(205.0f32, 415.0f32), (395.0, 340.0), (350.0, 505.0)];
+    let fold = [(395.0f32, 340.0f32), (285.0, 450.0), (300.0, 500.0)];
+    let inside = |p: (f32, f32), t: [(f32, f32); 3]| {
+        let sign = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| (a.0 - c.0) * (b.1 - c.1) - (b.0 - c.0) * (a.1 - c.1);
+        let (d1, d2, d3) = (sign(p, t[0], t[1]), sign(p, t[1], t[2]), sign(p, t[2], t[0]));
+        let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+        let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+        !(neg && pos)
+    };
+    let mut img = RgbaImage::new(W, H);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        let t = y as f32 / (H - 1) as f32;
+        let mut rgb = [lerp_u8(top[0], bottom[0], t), lerp_u8(top[1], bottom[1], t), lerp_u8(top[2], bottom[2], t)];
+        let p = (x as f32 + 0.5, y as f32 + 0.5);
+        let dist = ((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt();
+        if dist <= radius {
+            rgb = [0xff, 0xff, 0xff];
+            if inside(p, tri) {
+                rgb = [0x2a, 0xab, 0xee];
+            }
+            if inside(p, fold) {
+                rgb = [0x1c, 0x8c, 0xc9];
+            }
+        }
+        *px = image::Rgba([rgb[0], rgb[1], rgb[2], 255]);
+    }
+    img
+}
+
 /// Lists all supported image files in `dir` in deterministic lexicographical order.
 pub fn list_image_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();

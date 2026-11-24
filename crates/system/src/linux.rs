@@ -3,6 +3,8 @@
 //! `kscreen-doctor` / `org.kde.KWin` no KDE Wayland. Outros compositores Wayland não permitem
 //! mudar modo nem focar janelas de outro app e continuam `Unsupported`.
 
+use std::path::Path;
+
 use crate::{
     DisplayId, DisplayInfo, DisplayMode, LaunchRequest, LaunchedApp, Result, SystemControl, SystemError,
     UnsupportedSystem, WindowId, spawn_process,
@@ -69,6 +71,10 @@ impl SystemControl for LinuxSystem {
 
     fn windows_of_process(&self, _: u32) -> Result<Vec<WindowId>> {
         Err(SystemError::Unsupported("windows_of_process (pendente: _NET_WM_PID / KWin)"))
+    }
+
+    fn windows_of_executable(&self, _: &Path) -> Result<Vec<WindowId>> {
+        Err(SystemError::Unsupported("windows_of_executable (pendente: /proc/PID/exe + _NET_WM_PID)"))
     }
 
     fn minimize_window(&self, _: WindowId) -> Result<()> {

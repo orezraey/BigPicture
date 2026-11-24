@@ -23,6 +23,21 @@ fn main() {
         Some("list") => list(sys.as_ref()),
         Some("try-mode") => try_mode(sys.as_ref(), &args[1..]),
         Some("launch") => launch(sys.as_ref(), &args[1..]),
+        Some("open-find-close") => args.get(1).ok_or_else(|| "falta o executável".to_string()).and_then(|exe| {
+            let exe = std::path::Path::new(exe);
+            let app = sys.launch_app(&LaunchRequest { executable: exe.into(), ..Default::default() }).map_err(|e| e.to_string())?;
+            sleep(Duration::from_secs(3));
+            let by_pid = sys.windows_of_process(app.pid).map_err(|e| e.to_string())?;
+            let by_exe = sys.windows_of_executable(exe).map_err(|e| e.to_string())?;
+            println!("pid {}: {} janela(s) pelo pid, {} pelo executável", app.pid, by_pid.len(), by_exe.len());
+            for w in by_exe { sys.close_window(w).map_err(|e| e.to_string())?; }
+            Ok(())
+        }),
+        Some("windows-of") => args.get(1).ok_or_else(|| "falta o executável".to_string()).and_then(|exe| {
+            let found = sys.windows_of_executable(std::path::Path::new(exe)).map_err(|e| e.to_string())?;
+            println!("{} janela(s): {found:?}", found.len());
+            Ok(())
+        }),
         _ => Err("uso: list | try-mode WxH@HZ [--display ID] [--seconds N] | launch EXE [ARGS...]".into()),
     };
     if let Err(err) = result {

@@ -59,6 +59,54 @@ pub trait CatalogProvider: Send + Sync {
     fn entries(&self) -> Vec<CatalogEntry>;
 }
 
+/// Apps de desktop conhecidos que aparecem no início da grade quando estão instalados.
+/// Hoje só o Telegram Desktop (instalador oficial no Windows, pacote nativo no Linux).
+#[derive(Clone, Debug, Default)]
+pub struct InstalledAppsProvider {
+    candidates: Vec<PathBuf>,
+}
+
+impl InstalledAppsProvider {
+    /// Procura nos locais padrão de instalação.
+    pub fn detect() -> Self {
+        let mut candidates = Vec::new();
+        for var in ["APPDATA", "LOCALAPPDATA"] {
+            if let Some(base) = std::env::var_os(var) {
+                candidates.push(PathBuf::from(base).join("Telegram Desktop").join("Telegram.exe"));
+            }
+        }
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            candidates.push(PathBuf::from(pf).join("Telegram Desktop").join("Telegram.exe"));
+        }
+        candidates.push(PathBuf::from("/usr/bin/telegram-desktop"));
+        Self { candidates }
+    }
+
+    /// Usa exatamente estes caminhos candidatos (para testes).
+    pub fn with_candidates(candidates: Vec<PathBuf>) -> Self {
+        Self { candidates }
+    }
+}
+
+impl CatalogProvider for InstalledAppsProvider {
+    fn provider_name(&self) -> &'static str {
+        "installed-apps"
+    }
+
+    fn entries(&self) -> Vec<CatalogEntry> {
+        self.candidates
+            .iter()
+            .find(|path| path.is_file())
+            .map(|exe| {
+                CatalogEntry::new("app-telegram", "Telegram")
+                    .with_subtitle("App")
+                    .with_executable(exe.clone())
+            })
+            .into_iter()
+            .collect()
+    }
+}
+
 /// Static in-memory provider useful for testing and spike demos.
 #[derive(Clone, Debug, Default)]
 pub struct StaticCatalogProvider {
@@ -180,6 +228,24 @@ impl CatalogProvider for LocalFolderCatalogProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_apps_lists_telegram_only_when_the_executable_exists() {
+        let dir = std::env::temp_dir().join(format!("bigpicture_apps_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing").join("Telegram.exe");
+        let present = dir.join("Telegram.exe");
+        fs::write(&present, b"stub").unwrap();
+
+        assert!(InstalledAppsProvider::with_candidates(vec![missing.clone()]).entries().is_empty());
+        let entries = InstalledAppsProvider::with_candidates(vec![missing, present.clone()]).entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title(), "Telegram");
+        assert_eq!(entries[0].executable(), Some(&present));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn static_provider_returns_configured_entries() {

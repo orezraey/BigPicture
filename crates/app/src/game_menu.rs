@@ -27,6 +27,8 @@ impl GameAction {
 pub struct RunningGame {
     pub pid: u32,
     pub title: String,
+    /// Para achar a janela quando o processo aberto só repassou para outra instância.
+    pub executable: std::path::PathBuf,
 }
 
 /// Estado do menu aberto: qual opção está selecionada.

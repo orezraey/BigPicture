@@ -3,15 +3,19 @@
 #![allow(unsafe_code)]
 
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
     DISPLAY_DEVICE_PRIMARY_DEVICE, DISPLAY_DEVICEW, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
     ChangeDisplaySettingsExW, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW,
     EnumDisplaySettingsW,
 };
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_MENU,
 };
@@ -19,7 +23,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowThreadProcessId,
     IsIconic, IsWindowVisible, PostMessageW, SW_MINIMIZE, WM_CLOSE, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR};
+use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
 use crate::{
     DisplayId, DisplayInfo, DisplayMode, LaunchRequest, LaunchedApp, Result, SystemControl, SystemError,
@@ -164,30 +168,32 @@ impl SystemControl for WindowsSystem {
     }
 
     fn windows_of_process(&self, pid: u32) -> Result<Vec<WindowId>> {
-        struct Search {
-            pid: u32,
-            found: Vec<WindowId>,
-        }
-        unsafe extern "system" fn visit(window: HWND, lparam: LPARAM) -> BOOL {
-            // SAFETY: `lparam` é o `&mut Search` passado abaixo, vivo durante `EnumWindows`.
-            let search = unsafe { &mut *(lparam.0 as *mut Search) };
-            let mut owner_pid = 0u32;
-            // SAFETY: `window` vem do próprio EnumWindows.
-            let _ = unsafe { GetWindowThreadProcessId(window, Some(&mut owner_pid)) };
-            // Janelas principais: visíveis e sem dono (diálogos e tooltips têm dono).
-            let top_level = unsafe { GetWindow(window, GW_OWNER) }.is_err();
-            if owner_pid == search.pid && top_level && unsafe { IsWindowVisible(window) }.as_bool() {
-                search.found.push(WindowId(window.0 as usize as u64));
-            }
-            BOOL(1)
-        }
-        let mut search = Search { pid, found: Vec::new() };
-        // SAFETY: `visit` só usa `lparam` como `&mut Search` durante a chamada.
-        unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize)) }
-            .map_err(|e| SystemError::Failed(format!("EnumWindows: {e}")))?;
-        Ok(search.found)
+        Ok(top_level_windows()?
+            .into_iter()
+            .filter(|(_, owner)| *owner == pid)
+            .map(|(w, _)| w)
+            .collect())
     }
 
+    fn windows_of_executable(&self, executable: &Path) -> Result<Vec<WindowId>> {
+        let wanted = normalize_path(executable);
+        let mut found = Vec::new();
+        let mut checked: Vec<(u32, bool)> = Vec::new();
+        for (window, pid) in top_level_windows()? {
+            let matches = match checked.iter().find(|(p, _)| *p == pid) {
+                Some(&(_, m)) => m,
+                None => {
+                    let m = process_image(pid).is_some_and(|image| normalize_path(&image) == wanted);
+                    checked.push((pid, m));
+                    m
+                }
+            };
+            if matches {
+                found.push(window);
+            }
+        }
+        Ok(found)
+    }
     fn minimize_window(&self, window: WindowId) -> Result<()> {
         // SAFETY: HWND inválido só faz a chamada falhar.
         // ShowWindow devolve o estado anterior de visibilidade, não sucesso.
@@ -251,6 +257,48 @@ impl SystemControl for WindowsSystem {
     }
 }
 
+/// Janelas principais (visíveis, sem dono) de todos os processos, com o pid de cada uma.
+fn top_level_windows() -> Result<Vec<(WindowId, u32)>> {
+    unsafe extern "system" fn visit(window: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` é o `&mut Vec` passado abaixo, vivo durante `EnumWindows`.
+        let found = unsafe { &mut *(lparam.0 as *mut Vec<(WindowId, u32)>) };
+        let mut pid = 0u32;
+        // SAFETY: `window` vem do próprio EnumWindows.
+        let _ = unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+        // Diálogos e tooltips têm dono; janelas ocultas (bandeja) ficam de fora.
+        let top_level = unsafe { GetWindow(window, GW_OWNER) }.is_err();
+        if top_level && unsafe { IsWindowVisible(window) }.as_bool() {
+            found.push((WindowId(window.0 as usize as u64), pid));
+        }
+        BOOL(1)
+    }
+    let mut found: Vec<(WindowId, u32)> = Vec::new();
+    // SAFETY: `visit` só usa `lparam` como `&mut Vec` durante a chamada.
+    unsafe { EnumWindows(Some(visit), LPARAM(&mut found as *mut Vec<(WindowId, u32)> as isize)) }
+        .map_err(|e| SystemError::Failed(format!("EnumWindows: {e}")))?;
+    Ok(found)
+}
+
+/// Caminho completo do executável de `pid`, quando o sistema deixa consultar.
+fn process_image(pid: u32) -> Option<PathBuf> {
+    // SAFETY: o handle é fechado antes de sair; o buffer tem o tamanho informado.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(process);
+        ok.ok()?;
+        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+    }
+}
+
+/// Para comparar caminhos de executável: absoluto quando possível e sem diferença de caixa.
+fn normalize_path(path: &Path) -> String {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    path.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase()
+}
+
 fn is_foreground(window: WindowId) -> bool {
     // SAFETY: sem argumentos.
     let foreground = unsafe { GetForegroundWindow() };
@@ -293,6 +341,12 @@ mod tests {
         let err = sys.set_display_mode(&display.id, DisplayMode::new(123, 45, 67)).unwrap_err();
         assert_eq!(err, SystemError::ModeNotAvailable(DisplayMode::new(123, 45, 67)));
         assert_eq!(sys.list_displays().unwrap()[0].current, display.current);
+    }
+
+    #[test]
+    fn finds_no_windows_for_an_executable_that_is_not_running() {
+        let sys = WindowsSystem::new();
+        assert!(sys.windows_of_executable(Path::new(r"C:\nao\existe\jogo.exe")).unwrap().is_empty());
     }
 
     #[test]

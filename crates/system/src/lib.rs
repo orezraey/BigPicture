@@ -7,7 +7,7 @@
 //! escolha de modo são puros e testáveis sem monitor.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use thiserror::Error;
@@ -141,6 +141,11 @@ pub trait SystemControl: Send + Sync {
     /// Janelas visíveis de nível superior do processo `pid`.
     fn windows_of_process(&self, pid: u32) -> Result<Vec<WindowId>>;
 
+    /// Janelas visíveis de nível superior de qualquer processo rodando `executable`. Serve para
+    /// apps de instância única (como o Telegram), em que o processo aberto pelo launcher só
+    /// repassa o pedido para a instância que já existe e sai.
+    fn windows_of_executable(&self, executable: &Path) -> Result<Vec<WindowId>>;
+
     fn minimize_window(&self, window: WindowId) -> Result<()>;
 
     /// Pede para a janela fechar, como o botão X (o app pode perguntar se quer salvar).
@@ -215,6 +220,10 @@ impl SystemControl for UnsupportedSystem {
 
     fn windows_of_process(&self, _: u32) -> Result<Vec<WindowId>> {
         Err(SystemError::Unsupported("windows_of_process"))
+    }
+
+    fn windows_of_executable(&self, _: &Path) -> Result<Vec<WindowId>> {
+        Err(SystemError::Unsupported("windows_of_executable"))
     }
 
     fn minimize_window(&self, _: WindowId) -> Result<()> {

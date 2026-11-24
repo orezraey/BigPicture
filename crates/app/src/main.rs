@@ -1,6 +1,7 @@
 mod backdrop;
 mod benchmark;
 mod cli;
+mod display_menu;
 mod game_menu;
 mod texture_lru;
 mod window;
@@ -9,16 +10,16 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bigpicture_core::{CatalogEntry, Direction, GridMetrics};
 use bigpicture_input::NavCommand;
-use bigpicture_system::{LaunchRequest, SystemControl, WindowId};
+use bigpicture_system::{DisplayInfo, LaunchRequest, SystemControl, WindowId};
 use bigpicture_media::{
     COVER_HEIGHT, COVER_WIDTH, CacheOutcome, CoverCache, CoverLoaded, CoverLoader,
-    ensure_demo_covers, ensure_demo_trailers,
+    ensure_demo_covers, ensure_demo_trailers, ensure_telegram_cover,
 };
-use bigpicture_providers::{CatalogProvider as _, LocalFolderCatalogProvider};
+use bigpicture_providers::{CatalogProvider as _, InstalledAppsProvider, LocalFolderCatalogProvider};
 use gpui_fps::fps_monitor;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::{Theme, ThemeMode, VirtualListScrollHandle, v_virtual_list};
@@ -29,6 +30,7 @@ use image::{Frame, RgbaImage};
 use crate::backdrop::TrailerBackdrop;
 use crate::benchmark::ScrollBenchmarkRecorder;
 use crate::cli::CliArgs;
+use crate::display_menu::{DisplayMenu, RateOption};
 use crate::game_menu::{GameAction, GameMenu, RunningGame};
 use crate::texture_lru::CoverTextureLru;
 use crate::window::{SelectedMonitorInfo, build_borderless_fullscreen_options};
@@ -85,6 +87,8 @@ struct LauncherApp {
     running_game: Option<RunningGame>,
     /// Menu do jogo (Guide com um jogo aberto); enquanto aberto, a navegação vai para ele.
     game_menu: Option<GameMenu>,
+    /// Tela de taxa de atualização (botão Menu).
+    display_menu: Option<DisplayMenu>,
 }
 
 /// Opções de inicialização da janela vindas da linha de comando.
@@ -276,6 +280,7 @@ impl LauncherApp {
             demo_launch,
             running_game: None,
             game_menu: None,
+            display_menu: None,
         };
         app.play_focused_trailer();
         app
@@ -333,11 +338,20 @@ impl LauncherApp {
             cx.notify();
             return;
         }
+        if self.display_menu.is_some() && cmd != NavCommand::Guide {
+            self.handle_display_menu(cmd, cx);
+            cx.notify();
+            return;
+        }
         if let Some(dir) = cmd.direction() {
             self.move_focus(dir, cx);
             return;
         }
         match cmd {
+            NavCommand::Menu => {
+                self.open_display_menu();
+                cx.notify();
+            }
             NavCommand::Confirm => self.launch_focused(),
             NavCommand::Guide => {
                 self.bring_launcher_back();
@@ -348,18 +362,224 @@ impl LauncherApp {
                 }
                 cx.notify();
             }
-            NavCommand::Back | NavCommand::Menu => {
-                tracing::info!(command = ?cmd, "comando sem tela associada ainda");
+            NavCommand::Back => {
+                tracing::info!("voltar: nada para fechar na grade");
             }
             _ => {}
         }
     }
 
+    /// Monitor em que o launcher está (pela origem da janela), senão o principal.
+    fn launcher_display(&self) -> Option<DisplayInfo> {
+        let displays = self
+            .system
+            .list_displays()
+            .map_err(|err| tracing::warn!(error = %err, "não deu para listar os monitores"))
+            .ok()?;
+        let origin = self.monitor_info.bounds.origin;
+        let at = (origin.x.as_f32() as i32, origin.y.as_f32() as i32);
+        displays
+            .iter()
+            .find(|d| d.position == at)
+            .or_else(|| displays.iter().find(|d| d.primary))
+            .or(displays.first())
+            .cloned()
+    }
+
+    fn open_display_menu(&mut self) {
+        self.display_menu = self.launcher_display().map(DisplayMenu::new);
+    }
+
+    fn handle_display_menu(&mut self, cmd: NavCommand, cx: &mut Context<Self>) {
+        let Some(menu) = &mut self.display_menu else {
+            return;
+        };
+        if let Some(dir) = cmd.direction() {
+            menu.step(dir);
+            return;
+        }
+        let pending = menu.pending;
+        match (cmd, pending) {
+            (NavCommand::Confirm, Some(p)) => self.finish_rate_change(p.keep_selected),
+            (NavCommand::Back, Some(_)) => self.finish_rate_change(false),
+            (NavCommand::Back | NavCommand::Menu, None) => self.display_menu = None,
+            (NavCommand::Confirm, None) => self.apply_selected_rate(cx),
+            _ => {}
+        }
+    }
+
+    fn apply_selected_rate(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = &mut self.display_menu else {
+            return;
+        };
+        let id = menu.display.id.clone();
+        match menu.selected_option() {
+            RateOption::Mode(mode) if mode == menu.display.current => {}
+            RateOption::Mode(mode) => match self.system.set_display_mode(&id, mode) {
+                Ok(()) => {
+                    tracing::info!(display = %id, %mode, "taxa aplicada; aguardando confirmação");
+                    menu.start_confirmation(mode, Instant::now());
+                    self.watch_rate_confirmation(cx);
+                }
+                Err(err) => tracing::warn!(display = %id, %mode, error = %err, "taxa não aplicada"),
+            },
+            RateOption::SystemDefault => {
+                if let Err(err) = self.system.restore_display_mode(&id) {
+                    tracing::warn!(display = %id, error = %err, "não deu para voltar ao padrão");
+                }
+                // Relê o modo atual depois da volta ao padrão.
+                self.open_display_menu();
+            }
+        }
+    }
+
+    /// Fecha a confirmação; sem `keep`, volta à taxa anterior.
+    fn finish_rate_change(&mut self, keep: bool) {
+        let Some(menu) = &mut self.display_menu else {
+            return;
+        };
+        let id = menu.display.id.clone();
+        if let Some(previous) = menu.finish_confirmation(keep) {
+            match self.system.set_display_mode(&id, previous) {
+                Ok(()) => tracing::info!(display = %id, mode = %previous, "taxa anterior restaurada"),
+                Err(err) => {
+                    tracing::warn!(display = %id, error = %err, "falha ao voltar; usando o padrão do sistema");
+                    let _ = self.system.restore_display_mode(&id);
+                }
+            }
+        } else {
+            tracing::info!(display = %id, "taxa mantida");
+        }
+    }
+
+    /// Atualiza a contagem regressiva e volta sozinho quando o tempo acaba.
+    fn watch_rate_confirmation(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let still_pending = this
+                    .update(cx, |app, cx| {
+                        let Some(pending) = app.display_menu.as_ref().and_then(|m| m.pending) else {
+                            return false;
+                        };
+                        if pending.expired(Instant::now()) {
+                            app.finish_rate_change(false);
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !still_pending {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn render_display_menu(&self) -> Option<impl IntoElement + use<>> {
+        let menu = self.display_menu.as_ref()?;
+        let button = |label: String, selected: bool| {
+            div()
+                .px(px(24.))
+                .py(px(12.))
+                .rounded(px(10.))
+                .text_size(px(20.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .border_2()
+                .border_color(if selected { rgb(0x58a6ff) } else { rgb(0x30363d) })
+                .bg(if selected { rgb(0x1f3a5f) } else { rgb(0x161b22) })
+                .text_color(rgb(0xf0f6fc))
+                .child(label)
+        };
+        let current = menu.display.current;
+        let (heading, body, hint) = match menu.pending {
+            Some(p) => (
+                format!("Manter {} Hz?", p.applied.refresh_hz()),
+                div().flex().gap(px(16.)).children([
+                    button("Manter".into(), p.keep_selected),
+                    button(format!("Voltar para {} Hz", p.previous.refresh_hz()), !p.keep_selected),
+                ]),
+                format!(
+                    "Voltando sozinho em {} s · A confirma · B volta",
+                    p.seconds_left(Instant::now())
+                ),
+            ),
+            None => (
+                format!("Taxa de atualização · {}×{}", current.width(), current.height()),
+                div().flex().gap(px(12.)).children(
+                    menu.options
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, option)| {
+                            let active = *option == RateOption::Mode(current);
+                            let label = if active {
+                                format!("{} (atual)", option.label())
+                            } else {
+                                option.label()
+                            };
+                            button(label, ix == menu.selected)
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                "A aplica · B ou Menu fecha · vale até o launcher fechar".to_string(),
+            ),
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(24.))
+                        .p(px(40.))
+                        .rounded(px(16.))
+                        .bg(rgb(0x0d1117))
+                        .border_1()
+                        .border_color(rgb(0x30363d))
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .text_color(rgb(0x8b949e))
+                                .child(format!("{} · {}", menu.display.id, menu.display.name)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(28.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xf0f6fc))
+                                .child(heading),
+                        )
+                        .child(body)
+                        .child(div().text_size(px(13.)).text_color(rgb(0x8b949e)).child(hint)),
+                ),
+        )
+    }
+
     /// Janelas do jogo aberto (vazio se ele já fechou).
     fn game_windows(&self) -> Vec<WindowId> {
-        self.running_game
-            .as_ref()
-            .and_then(|game| self.system.windows_of_process(game.pid).ok())
+        let Some(game) = &self.running_game else {
+            return Vec::new();
+        };
+        let by_pid = self.system.windows_of_process(game.pid).unwrap_or_default();
+        if !by_pid.is_empty() {
+            return by_pid;
+        }
+        // Apps de instância única (Telegram): o processo aberto saiu e a janela é da instância
+        // que já existia.
+        self.system
+            .windows_of_executable(&game.executable)
             .unwrap_or_default()
     }
 
@@ -478,6 +698,7 @@ impl LauncherApp {
                 self.running_game = Some(RunningGame {
                     pid: app.pid,
                     title: entry.title().to_string(),
+                    executable: request.executable.clone(),
                 });
             }
             Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir jogo"),
@@ -871,6 +1092,7 @@ impl Render for LauncherApp {
                     .child(grid)
                     .child(Scrollbar::vertical(&self.scroll_handle)),
             )
+            .children(self.render_display_menu())
             .children(self.render_game_menu())
             .child(fps_monitor(window, cx))
     }
@@ -909,7 +1131,21 @@ fn main() -> anyhow::Result<()> {
     };
     let provider = LocalFolderCatalogProvider::from_directory(&covers_dir, TARGET_CARD_COUNT)?
         .with_trailer_files(trailer_files);
-    let entries = provider.entries();
+    // Apps instalados (Telegram) entram antes das capas demo; fora do benchmark, para a grade
+    // medida continuar com exatamente 1.000 cards.
+    let mut entries = Vec::new();
+    if !cli.benchmark_scroll() {
+        let cover = ensure_telegram_cover(Path::new("assets/apps/telegram_cover.png"))
+            .map_err(|err| tracing::warn!(error = %err, "capa do Telegram não gerada"))
+            .ok();
+        for app in InstalledAppsProvider::detect().entries() {
+            entries.push(match &cover {
+                Some(path) => app.with_cover_path(path.clone()),
+                None => app,
+            });
+        }
+    }
+    entries.extend(provider.entries());
 
     let cover_cache = CoverCache::new(&cache_dir)?;
     let worker_threads = std::thread::available_parallelism()
@@ -952,6 +1188,7 @@ fn main() -> anyhow::Result<()> {
                 KeyBinding::new("backspace", NavBack, Some(KEY_CONTEXT)),
                 // Equivalente de teclado ao Guide (só chega quando o launcher tem o foco).
                 KeyBinding::new("home", NavGuide, Some(KEY_CONTEXT)),
+                KeyBinding::new("m", NavMenu, Some(KEY_CONTEXT)),
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
