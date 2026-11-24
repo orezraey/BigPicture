@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bigpicture_core::{CatalogEntry, Direction, GridMetrics};
 use bigpicture_input::NavCommand;
+use bigpicture_system::{LaunchRequest, SystemControl, WindowId};
 use bigpicture_media::{
     COVER_HEIGHT, COVER_WIDTH, CacheOutcome, CoverCache, CoverLoaded, CoverLoader,
     ensure_demo_covers, ensure_demo_trailers,
@@ -72,6 +73,18 @@ struct LauncherApp {
     trailers_enabled: bool,
     /// Muda a cada movimento de foco; o trailer só troca quando o foco para.
     focus_generation: u64,
+    /// Monitores e janelas do sistema (backend da plataforma).
+    system: Arc<dyn SystemControl>,
+    /// Janela principal do launcher no sistema, achada na primeira vez que precisa voltar à frente.
+    launcher_window: Option<WindowId>,
+    /// `--demo-launch`: o que o Confirmar abre nos cards sem executável.
+    demo_launch: Option<PathBuf>,
+}
+
+/// Opções de inicialização da janela vindas da linha de comando.
+struct LaunchOptions {
+    benchmark_scroll: bool,
+    demo_launch: Option<PathBuf>,
 }
 
 impl LauncherApp {
@@ -80,10 +93,14 @@ impl LauncherApp {
         entries: Vec<CatalogEntry>,
         cover_loader: CoverLoader,
         channels: InputChannels,
-        benchmark_scroll: bool,
+        options: LaunchOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let LaunchOptions {
+            benchmark_scroll,
+            demo_launch,
+        } = options;
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -248,6 +265,9 @@ impl LauncherApp {
             backdrop,
             trailers_enabled: !benchmark_scroll,
             focus_generation: 0,
+            system: Arc::from(bigpicture_system::platform()),
+            launcher_window: None,
+            demo_launch,
         };
         app.play_focused_trailer();
         app
@@ -291,18 +311,61 @@ impl LauncherApp {
             self.move_focus(dir, cx);
             return;
         }
-        let entry = self.entries.get(self.focused);
         match cmd {
-            // Iniciar o jogo depende de `SystemControl::launch_app` (crate `system`, próximo item).
-            NavCommand::Confirm => tracing::info!(
-                index = self.focused,
-                title = entry.map(CatalogEntry::title),
-                "confirmar no card focado"
-            ),
-            NavCommand::Back | NavCommand::Menu | NavCommand::Guide => {
+            NavCommand::Confirm => self.launch_focused(),
+            NavCommand::Guide => self.bring_launcher_back(),
+            NavCommand::Back | NavCommand::Menu => {
                 tracing::info!(command = ?cmd, "comando sem tela associada ainda");
             }
             _ => {}
+        }
+    }
+
+    /// Abre o jogo do card focado (ou o `--demo-launch`, nos cards demo).
+    fn launch_focused(&mut self) {
+        let Some(entry) = self.entries.get(self.focused) else {
+            return;
+        };
+        let Some(executable) = entry.executable().or(self.demo_launch.as_ref()).cloned() else {
+            tracing::info!(
+                title = entry.title(),
+                "card sem executável (use --demo-launch EXE para testar)"
+            );
+            return;
+        };
+        let request = LaunchRequest {
+            executable,
+            args: entry.args().to_vec(),
+            working_dir: None,
+        };
+        match self.system.launch_app(&request) {
+            Ok(app) => tracing::info!(title = entry.title(), pid = app.pid, "jogo aberto"),
+            Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir jogo"),
+        }
+    }
+
+    /// Guide: traz o launcher de volta para a frente, mesmo com um jogo em primeiro plano.
+    fn bring_launcher_back(&mut self) {
+        let window = match self.launcher_window {
+            Some(window) => window,
+            None => match self.system.windows_of_process(std::process::id()) {
+                Ok(windows) if !windows.is_empty() => {
+                    self.launcher_window = Some(windows[0]);
+                    windows[0]
+                }
+                Ok(_) => {
+                    tracing::warn!("janela do launcher não encontrada");
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "não deu para achar a janela do launcher");
+                    return;
+                }
+            },
+        };
+        match self.system.bring_launcher_to_front(window) {
+            Ok(()) => tracing::info!("launcher trazido para a frente"),
+            Err(err) => tracing::warn!(error = %err, "launcher não veio para a frente"),
         }
     }
 
@@ -713,7 +776,10 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(4);
     let (cover_loader, cover_rx) = CoverLoader::new(cover_cache, worker_threads);
 
-    let benchmark_scroll = cli.benchmark_scroll();
+    let options = LaunchOptions {
+        benchmark_scroll: cli.benchmark_scroll(),
+        demo_launch: cli.demo_launch().map(Path::to_path_buf),
+    };
 
     let (nav_tx, nav_rx) = std::sync::mpsc::channel();
     let nav_rx = match bigpicture_input::gamepad::spawn(nav_tx) {
@@ -767,7 +833,7 @@ fn main() -> anyhow::Result<()> {
                         entries,
                         cover_loader,
                         channels,
-                        benchmark_scroll,
+                        options,
                         window,
                         cx,
                     )

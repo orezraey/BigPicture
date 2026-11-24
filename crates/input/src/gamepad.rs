@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 use gilrs::{Axis, Button, EventType, Gilrs};
 
 use crate::NavCommand;
+use crate::guide::GuidePoller;
 use crate::repeat::NavRepeater;
 use crate::stick::{StickEdge, StickState};
 
-/// Espera máxima por um evento quando nada está sendo repetido.
-const IDLE_POLL: Duration = Duration::from_millis(250);
+/// Espera máxima por um evento quando nada está sendo repetido. Curta porque, no Windows, o
+/// botão Guide é lido por consulta a cada volta do laço (ver `guide`).
+const IDLE_POLL: Duration = Duration::from_millis(40);
 
 /// Mapeia um botão do layout padrão (posições Xbox) para um comando.
 pub fn button_command(button: Button) -> Option<NavCommand> {
@@ -54,8 +56,12 @@ pub fn spawn(tx: Sender<NavCommand>) -> std::io::Result<JoinHandle<()>> {
 fn run(gilrs: &mut Gilrs, tx: &Sender<NavCommand>) -> Result<(), SendError<NavCommand>> {
     let mut repeat = NavRepeater::new();
     let mut stick = StickState::new();
+    let mut guide = GuidePoller::new();
     loop {
-        let wait = repeat.time_until_next(Instant::now()).unwrap_or(IDLE_POLL);
+        if guide.poll() {
+            tx.send(NavCommand::Guide)?;
+        }
+        let wait = repeat.time_until_next(Instant::now()).map_or(IDLE_POLL, |w| w.min(IDLE_POLL));
         if let Some(ev) = gilrs.next_event_blocking(Some(wait)) {
             let now = Instant::now();
             match ev.event {

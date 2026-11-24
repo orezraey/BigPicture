@@ -586,6 +586,7 @@ version = "0.1.0"
 dependencies = [
  "bigpicture-core",
  "gilrs",
+ "rusty-xinput",
  "tracing",
 ]
 
@@ -615,6 +616,7 @@ name = "bigpicture-system"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
+ "windows 0.62.2",
 ]
 
 [[package]]

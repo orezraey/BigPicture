@@ -10,6 +10,7 @@ pub struct CliArgs {
     cache_dir: Option<PathBuf>,
     exit_after_ms: Option<u64>,
     benchmark_scroll: bool,
+    demo_launch: Option<PathBuf>,
 }
 
 impl CliArgs {
@@ -55,11 +56,18 @@ impl CliArgs {
                 parsed.exit_after_ms = Some(parse_u64(value.as_ref(), "--exit-after-ms")?);
             } else if let Some(value) = arg.strip_prefix("--exit-after-ms=") {
                 parsed.exit_after_ms = Some(parse_u64(value, "--exit-after-ms")?);
+            } else if arg == "--demo-launch" {
+                let value = iter
+                    .next()
+                    .context("missing executable after --demo-launch")?;
+                parsed.demo_launch = Some(PathBuf::from(value.as_ref()));
+            } else if let Some(value) = arg.strip_prefix("--demo-launch=") {
+                parsed.demo_launch = Some(PathBuf::from(value));
             } else if arg == "--benchmark-scroll" {
                 parsed.benchmark_scroll = true;
             } else if arg == "--help" || arg == "-h" {
                 println!(
-                    "BigPicture Launcher\n\nUsage:\n  bigpicture-app [--monitor <N>] [--covers-dir <DIR>] [--cache-dir <DIR>] [--benchmark-scroll] [--exit-after-ms <MS>]"
+                    "BigPicture Launcher\n\nUsage:\n  bigpicture-app [--monitor <N>] [--covers-dir <DIR>] [--cache-dir <DIR>] [--benchmark-scroll] [--exit-after-ms <MS>] [--demo-launch <EXE>]"
                 );
                 std::process::exit(0);
             } else {
@@ -88,6 +96,11 @@ impl CliArgs {
 
     pub fn benchmark_scroll(&self) -> bool {
         self.benchmark_scroll
+    }
+
+    /// Executável aberto pelo Confirmar nos cards demo, que não têm executável próprio.
+    pub fn demo_launch(&self) -> Option<&Path> {
+        self.demo_launch.as_deref()
     }
 }
 
@@ -125,6 +138,8 @@ mod tests {
             "assets/cache",
             "--benchmark-scroll",
             "--exit-after-ms=500",
+            "--demo-launch",
+            "charmap.exe",
         ])
         .unwrap();
         assert_eq!(parsed.monitor(), Some(1));
@@ -132,6 +147,7 @@ mod tests {
         assert_eq!(parsed.cache_dir(), Some(Path::new("assets/cache")));
         assert!(parsed.benchmark_scroll());
         assert_eq!(parsed.exit_after_ms(), Some(500));
+        assert_eq!(parsed.demo_launch(), Some(Path::new("charmap.exe")));
     }
 
     #[test]

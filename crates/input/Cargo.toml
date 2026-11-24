@@ -10,3 +10,7 @@ gilrs.workspace = true
 tracing.workspace = true
 
 bigpicture-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Só para ler o botão Guide (XInputGetStateEx); já vem no lockfile como dependência do gilrs.
+rusty-xinput = "1.3"

@@ -5,6 +5,7 @@
 //! pura (repetição ao segurar e analógico como direcional), testável sem controle conectado.
 
 pub mod gamepad;
+pub mod guide;
 pub mod repeat;
 pub mod stick;
 
