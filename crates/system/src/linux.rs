@@ -77,6 +77,10 @@ impl SystemControl for LinuxSystem {
         Err(SystemError::Unsupported("windows_of_executable (pendente: /proc/PID/exe + _NET_WM_PID)"))
     }
 
+    fn windows_in_directory(&self, _: &Path) -> Result<Vec<WindowId>> {
+        Err(SystemError::Unsupported("windows_in_directory (pendente: /proc/PID/exe + _NET_WM_PID)"))
+    }
+
     fn minimize_window(&self, _: WindowId) -> Result<()> {
         Err(SystemError::Unsupported("minimize_window (pendente: EWMH / KWin)"))
     }

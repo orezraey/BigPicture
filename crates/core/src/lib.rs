@@ -2,8 +2,10 @@
 
 use std::path::PathBuf;
 
+pub mod library;
 pub mod spatial;
 
+pub use library::{Achievement, GameSource, progress};
 pub use spatial::{Direction, navigate_rects};
 
 /// Unique identifier for a game or launchable entry in the library.
@@ -31,6 +33,13 @@ pub struct CatalogEntry {
     trailer_path: Option<PathBuf>,
     executable: Option<PathBuf>,
     args: Vec<String>,
+    /// Loja de origem (Steam, Epic) ou local.
+    source: GameSource,
+    /// Pasta de instalação: serve para achar as janelas do jogo depois de aberto pela loja.
+    install_dir: Option<PathBuf>,
+    /// Endereço que a loja usa para abrir o jogo (`steam://rungameid/…`), no lugar de
+    /// chamar o executável direto, para a loja cuidar de atualização, DRM e overlay.
+    launch_uri: Option<String>,
 }
 
 impl CatalogEntry {
@@ -43,6 +52,9 @@ impl CatalogEntry {
             trailer_path: None,
             executable: None,
             args: Vec::new(),
+            source: GameSource::Local,
+            install_dir: None,
+            launch_uri: None,
         }
     }
 
@@ -73,6 +85,33 @@ impl CatalogEntry {
     {
         self.args = args.into_iter().map(Into::into).collect();
         self
+    }
+
+    pub fn with_source(mut self, source: GameSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    pub fn with_install_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.install_dir = Some(dir.into());
+        self
+    }
+
+    pub fn with_launch_uri(mut self, uri: impl Into<String>) -> Self {
+        self.launch_uri = Some(uri.into());
+        self
+    }
+
+    pub fn source(&self) -> &GameSource {
+        &self.source
+    }
+
+    pub fn install_dir(&self) -> Option<&PathBuf> {
+        self.install_dir.as_ref()
+    }
+
+    pub fn launch_uri(&self) -> Option<&str> {
+        self.launch_uri.as_deref()
     }
 
     pub fn id(&self) -> &AppId {

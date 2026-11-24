@@ -11,6 +11,7 @@ pub struct CliArgs {
     exit_after_ms: Option<u64>,
     benchmark_scroll: bool,
     demo_launch: Option<PathBuf>,
+    demo_catalog: bool,
 }
 
 impl CliArgs {
@@ -63,11 +64,13 @@ impl CliArgs {
                 parsed.demo_launch = Some(PathBuf::from(value.as_ref()));
             } else if let Some(value) = arg.strip_prefix("--demo-launch=") {
                 parsed.demo_launch = Some(PathBuf::from(value));
+            } else if arg == "--demo-catalog" {
+                parsed.demo_catalog = true;
             } else if arg == "--benchmark-scroll" {
                 parsed.benchmark_scroll = true;
             } else if arg == "--help" || arg == "-h" {
                 println!(
-                    "BigPicture Launcher\n\nUsage:\n  bigpicture-app [--monitor <N>] [--covers-dir <DIR>] [--cache-dir <DIR>] [--benchmark-scroll] [--exit-after-ms <MS>] [--demo-launch <EXE>]"
+                    "BigPicture Launcher\n\nUsage:\n  bigpicture-app [--monitor <N>] [--covers-dir <DIR>] [--cache-dir <DIR>] [--benchmark-scroll] [--exit-after-ms <MS>] [--demo-launch <EXE>] [--demo-catalog]"
                 );
                 std::process::exit(0);
             } else {
@@ -96,6 +99,11 @@ impl CliArgs {
 
     pub fn benchmark_scroll(&self) -> bool {
         self.benchmark_scroll
+    }
+
+    /// Mostra as 1.000 capas demo mesmo quando há jogos instalados.
+    pub fn demo_catalog(&self) -> bool {
+        self.demo_catalog
     }
 
     /// Executável aberto pelo Confirmar nos cards demo, que não têm executável próprio.
@@ -140,6 +148,7 @@ mod tests {
             "--exit-after-ms=500",
             "--demo-launch",
             "charmap.exe",
+            "--demo-catalog",
         ])
         .unwrap();
         assert_eq!(parsed.monitor(), Some(1));
@@ -148,6 +157,7 @@ mod tests {
         assert!(parsed.benchmark_scroll());
         assert_eq!(parsed.exit_after_ms(), Some(500));
         assert_eq!(parsed.demo_launch(), Some(Path::new("charmap.exe")));
+        assert!(parsed.demo_catalog());
     }
 
     #[test]

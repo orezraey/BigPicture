@@ -146,6 +146,11 @@ pub trait SystemControl: Send + Sync {
     /// repassa o pedido para a instância que já existe e sai.
     fn windows_of_executable(&self, executable: &Path) -> Result<Vec<WindowId>>;
 
+    /// Janelas visíveis de nível superior de processos cujo executável está dentro de `dir`.
+    /// Serve para jogos abertos pela loja (Steam, Epic): o launcher não conhece o processo, mas
+    /// conhece a pasta de instalação.
+    fn windows_in_directory(&self, dir: &Path) -> Result<Vec<WindowId>>;
+
     fn minimize_window(&self, window: WindowId) -> Result<()>;
 
     /// Pede para a janela fechar, como o botão X (o app pode perguntar se quer salvar).
@@ -226,6 +231,10 @@ impl SystemControl for UnsupportedSystem {
         Err(SystemError::Unsupported("windows_of_executable"))
     }
 
+    fn windows_in_directory(&self, _: &Path) -> Result<Vec<WindowId>> {
+        Err(SystemError::Unsupported("windows_in_directory"))
+    }
+
     fn minimize_window(&self, _: WindowId) -> Result<()> {
         Err(SystemError::Unsupported("minimize_window"))
     }
@@ -241,6 +250,20 @@ impl SystemControl for UnsupportedSystem {
     fn bring_launcher_to_front(&self, _: WindowId) -> Result<()> {
         Err(SystemError::Unsupported("bring_launcher_to_front"))
     }
+}
+
+/// Abre um endereço pelo programa registrado no sistema (`steam://…`, `com.epicgames.launcher://…`).
+/// O launcher da loja é quem abre o jogo, então não há pid do jogo para devolver.
+pub fn open_uri(uri: &str) -> Result<()> {
+    #[cfg(windows)]
+    let (program, args) = ("explorer.exe", [uri]);
+    #[cfg(not(windows))]
+    let (program, args) = ("xdg-open", [uri]);
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| SystemError::Failed(format!("{program} {uri}: {e}")))
 }
 
 /// Abre um processo de forma portátil, sem esperar por ele.

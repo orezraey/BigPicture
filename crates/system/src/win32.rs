@@ -194,6 +194,29 @@ impl SystemControl for WindowsSystem {
         }
         Ok(found)
     }
+    fn windows_in_directory(&self, dir: &Path) -> Result<Vec<WindowId>> {
+        let mut prefix = normalize_path(dir);
+        if !prefix.ends_with('\\') {
+            prefix.push('\\');
+        }
+        let mut found = Vec::new();
+        let mut checked: Vec<(u32, bool)> = Vec::new();
+        for (window, pid) in top_level_windows()? {
+            let inside = match checked.iter().find(|(p, _)| *p == pid) {
+                Some(&(_, inside)) => inside,
+                None => {
+                    let inside = process_image(pid).is_some_and(|image| normalize_path(&image).starts_with(&prefix));
+                    checked.push((pid, inside));
+                    inside
+                }
+            };
+            if inside {
+                found.push(window);
+            }
+        }
+        Ok(found)
+    }
+
     fn minimize_window(&self, window: WindowId) -> Result<()> {
         // SAFETY: HWND inválido só faz a chamada falhar.
         // ShowWindow devolve o estado anterior de visibilidade, não sucesso.
@@ -347,6 +370,15 @@ mod tests {
     fn finds_no_windows_for_an_executable_that_is_not_running() {
         let sys = WindowsSystem::new();
         assert!(sys.windows_of_executable(Path::new(r"C:\nao\existe\jogo.exe")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn finds_windows_of_processes_inside_a_directory() {
+        let sys = WindowsSystem::new();
+        assert!(sys.windows_in_directory(Path::new(r"C:\nao\existe")).unwrap().is_empty());
+        // O Explorer (barra de tarefas) sempre tem janela de nível superior visível.
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+        assert!(!sys.windows_in_directory(Path::new(&windir)).unwrap().is_empty());
     }
 
     #[test]

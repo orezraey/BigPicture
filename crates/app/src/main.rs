@@ -19,6 +19,8 @@ use bigpicture_media::{
     COVER_HEIGHT, COVER_WIDTH, CacheOutcome, CoverCache, CoverLoaded, CoverLoader,
     ensure_demo_covers, ensure_demo_trailers, ensure_telegram_cover,
 };
+use bigpicture_providers::epic::EpicLibrary;
+use bigpicture_providers::steam::SteamLibrary;
 use bigpicture_providers::{CatalogProvider as _, InstalledAppsProvider, LocalFolderCatalogProvider};
 use gpui_fps::fps_monitor;
 use gpui_kit::component::scroll::Scrollbar;
@@ -572,14 +574,24 @@ impl LauncherApp {
         let Some(game) = &self.running_game else {
             return Vec::new();
         };
-        let by_pid = self.system.windows_of_process(game.pid).unwrap_or_default();
-        if !by_pid.is_empty() {
-            return by_pid;
+        if game.pid != 0 {
+            let by_pid = self.system.windows_of_process(game.pid).unwrap_or_default();
+            if !by_pid.is_empty() {
+                return by_pid;
+            }
         }
         // Apps de instância única (Telegram): o processo aberto saiu e a janela é da instância
         // que já existia.
-        self.system
-            .windows_of_executable(&game.executable)
+        if let Some(exe) = &game.executable {
+            let by_exe = self.system.windows_of_executable(exe).unwrap_or_default();
+            if !by_exe.is_empty() {
+                return by_exe;
+            }
+        }
+        // Jogos abertos pela loja: qualquer processo rodando de dentro da pasta de instalação.
+        game.install_dir
+            .as_ref()
+            .and_then(|dir| self.system.windows_in_directory(dir).ok())
             .unwrap_or_default()
     }
 
@@ -680,6 +692,22 @@ impl LauncherApp {
         let Some(entry) = self.entries.get(self.focused) else {
             return;
         };
+        // Jogos de loja abrem pela própria loja (atualizações, DRM, overlay da Steam).
+        if let Some(uri) = entry.launch_uri() {
+            match bigpicture_system::open_uri(uri) {
+                Ok(()) => {
+                    tracing::info!(title = entry.title(), uri, "jogo aberto pela loja");
+                    self.running_game = Some(RunningGame {
+                        pid: 0,
+                        title: entry.title().to_string(),
+                        executable: entry.executable().cloned(),
+                        install_dir: entry.install_dir().cloned(),
+                    });
+                }
+                Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir pela loja"),
+            }
+            return;
+        }
         let Some(executable) = entry.executable().or(self.demo_launch.as_ref()).cloned() else {
             tracing::info!(
                 title = entry.title(),
@@ -698,7 +726,8 @@ impl LauncherApp {
                 self.running_game = Some(RunningGame {
                     pid: app.pid,
                     title: entry.title().to_string(),
-                    executable: request.executable.clone(),
+                    executable: Some(request.executable.clone()),
+                    install_dir: entry.install_dir().cloned(),
                 });
             }
             Err(err) => tracing::warn!(title = entry.title(), error = %err, "falha ao abrir jogo"),
@@ -1131,10 +1160,19 @@ fn main() -> anyhow::Result<()> {
     };
     let provider = LocalFolderCatalogProvider::from_directory(&covers_dir, TARGET_CARD_COUNT)?
         .with_trailer_files(trailer_files);
-    // Apps instalados (Telegram) entram antes das capas demo; fora do benchmark, para a grade
-    // medida continuar com exatamente 1.000 cards.
+    // Biblioteca real (Steam, Epic) e apps instalados (Telegram). O benchmark usa só as 1.000
+    // capas demo; fora dele, as capas demo só entram quando não há nenhum jogo instalado (ou com
+    // --demo-catalog).
     let mut entries = Vec::new();
     if !cli.benchmark_scroll() {
+        if let Some(steam) = SteamLibrary::detect() {
+            entries.extend(steam.entries());
+        }
+        if let Some(epic) = EpicLibrary::detect() {
+            entries.extend(epic.entries());
+        }
+        tracing::info!(games = entries.len(), "biblioteca real carregada");
+        let games_found = !entries.is_empty();
         let cover = ensure_telegram_cover(Path::new("assets/apps/telegram_cover.png"))
             .map_err(|err| tracing::warn!(error = %err, "capa do Telegram não gerada"))
             .ok();
@@ -1144,8 +1182,12 @@ fn main() -> anyhow::Result<()> {
                 None => app,
             });
         }
+        if !games_found || cli.demo_catalog() {
+            entries.extend(provider.entries());
+        }
+    } else {
+        entries.extend(provider.entries());
     }
-    entries.extend(provider.entries());
 
     let cover_cache = CoverCache::new(&cache_dir)?;
     let worker_threads = std::thread::available_parallelism()

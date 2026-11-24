@@ -1,5 +1,9 @@
 //! Local catalog providers for BigPicture (store integrations are Milestone 2).
 
+pub mod epic;
+pub mod keyvalues;
+pub mod steam;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
