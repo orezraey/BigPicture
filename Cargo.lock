@@ -572,6 +572,7 @@ dependencies = [
  "gpui-fps",
  "gpui-kit",
  "image",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]
