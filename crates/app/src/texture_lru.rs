@@ -33,6 +33,12 @@ impl CoverTextureLru {
         Some(img)
     }
 
+    /// Esvazia o cache e devolve as imagens para o chamador liberar com `window.drop_image(...)`.
+    pub fn clear(&mut self) -> Vec<Arc<RenderImage>> {
+        self.order.clear();
+        self.map.drain().map(|(_, image)| image).collect()
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }

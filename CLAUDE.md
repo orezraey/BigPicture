@@ -52,4 +52,4 @@ Launcher de jogos em tela cheia estilo Steam Big Picture para **Windows** e **Li
 
 - Nunca incluir coautoria ou atribuição de IA: sem `Co-Authored-By: Claude`, sem `Claude-Session:`, sem rodapé `Generated with Claude Code`.
 - Autor dos commits: `orezraey <49327055+orezraey@users.noreply.github.com>` (configurado no `.git/config` local; o repositório é público).
-
+- Depois de uma mudança grande, rodar o code review no nível `high` e aplicar as correções **antes** do commit.

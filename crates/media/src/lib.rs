@@ -51,19 +51,24 @@ impl RgbaFrame {
         &self.pixels
     }
 
-    /// Consumes the RGBA8 frame and converts channels in-place to BGRA8
-    /// (the pixel layout expected by GPUI's `RenderImage`).
     /// Cópia redimensionada (filtro triangular: bom para reduzir, rápido o bastante para as
     /// threads de capa). `None` se o tamanho pedido for zero.
     pub fn resized(&self, width: u32, height: u32) -> Option<Self> {
         if width == 0 || height == 0 {
             return None;
         }
-        let image = image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())?;
+        // Lê os pixels emprestados, sem copiar os 2,1 MB da capa cheia antes de reduzir.
+        let image = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+            self.width,
+            self.height,
+            self.pixels.as_slice(),
+        )?;
         let small = image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle);
         Self::new(width, height, small.into_raw())
     }
 
+    /// Consumes the RGBA8 frame and converts channels in-place to BGRA8
+    /// (the pixel layout expected by GPUI's `RenderImage`).
     pub fn into_bgra_bytes(mut self) -> Vec<u8> {
         for px in self.pixels.as_chunks_mut::<4>().0 {
             px.swap(0, 2);

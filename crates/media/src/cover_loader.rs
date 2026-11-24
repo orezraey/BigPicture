@@ -168,10 +168,11 @@ fn download(url: &str, dest: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Reduz o frame para o tamanho combinado (`w << 32 | h`), sem nunca ampliar.
+/// Reduz o frame para o tamanho combinado (`w << 32 | h`), sem nunca ampliar: se o alvo não é
+/// menor nas duas dimensões, o frame segue como está.
 fn fit_output(frame: RgbaFrame, packed: u64) -> RgbaFrame {
     let (w, h) = ((packed >> 32) as u32, packed as u32);
-    if packed == 0 || (w >= frame.width() && h >= frame.height()) {
+    if packed == 0 || w >= frame.width() || h >= frame.height() {
         return frame;
     }
     frame.resized(w, h).unwrap_or(frame)

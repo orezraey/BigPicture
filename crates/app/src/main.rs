@@ -118,6 +118,9 @@ struct LauncherApp {
     /// O mouse foi usado por último (mostra o hover dos cards); falso depois de navegar pelo
     /// controle ou teclado.
     pointer_active: bool,
+    /// Escala da janela com que as capas foram pedidas ao `cover_loader`; quando muda (outro
+    /// monitor, outra escala do sistema), as capas são pedidas de novo no tamanho novo.
+    cover_scale: f32,
 }
 
 /// Opções de inicialização da janela vindas da linha de comando.
@@ -150,19 +153,13 @@ impl LauncherApp {
             settings,
             steam_sync_tx,
         } = options;
-        // Capas na memória no tamanho em que o card as mostra (pixels físicos), não em 600×900.
-        {
-            let metrics = GridMetrics::default();
-            let scale = window.scale_factor();
-            cover_loader.set_output_size(
-                (metrics.card_width * scale).round() as u32,
-                (metrics.cover_height * scale).round() as u32,
-            );
-        }
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
         let grid_metrics = GridMetrics::default();
+        // Capas na memória no tamanho em que o card as mostra (pixels físicos), não em 600×900.
+        let cover_scale = window.scale_factor();
+        set_cover_output_size(&cover_loader, &grid_metrics, cover_scale);
         let initial_cols = grid_metrics.columns_for_width(monitor_info.bounds.size.width.as_f32());
         let initial_rows = grid_metrics.row_count(entries.len(), initial_cols);
         let row_sizes = Rc::new(vec![
@@ -361,6 +358,7 @@ impl LauncherApp {
             settings,
             steam_sync_tx,
             pointer_active: true,
+            cover_scale,
         };
         app.play_focused_trailer();
         if app.steam.is_some() && !benchmark_scroll {
@@ -481,13 +479,17 @@ impl LauncherApp {
     }
 
     /// Aplica um comando de navegação vindo do controle (thread `bp-gamepad`) ou do teclado.
-    fn handle_nav(&mut self, cmd: NavCommand, _window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_nav(&mut self, cmd: NavCommand, window: &mut Window, cx: &mut Context<Self>) {
         // Navegando por controle ou teclado: some o cursor e o destaque de hover, até o mouse mexer.
         if self.pointer_active {
             self.pointer_active = false;
             cx.notify();
         }
-        bigpicture_system::hide_cursor_until_mouse_moves();
+        // O controle continua mandando comandos com um jogo na frente: só mexe no cursor quando
+        // o launcher é a janela ativa e o mouse está sobre ela.
+        if window.is_window_active() && window.is_window_hovered() {
+            bigpicture_system::hide_cursor_until_mouse_moves();
+        }
         if let Some(prompt) = &mut self.steam_prompt {
             match cmd {
                 NavCommand::Up | NavCommand::Down | NavCommand::Left | NavCommand::Right => {
@@ -1116,6 +1118,28 @@ impl LauncherApp {
         }
     }
 
+    /// O mouse voltou a ser usado: o hover dos cards volta a aparecer.
+    fn activate_pointer(&mut self, cx: &mut Context<Self>) {
+        if !self.pointer_active {
+            self.pointer_active = true;
+            cx.notify();
+        }
+    }
+
+    /// Reajusta o tamanho das capas em memória se a escala da janela mudou: as texturas já
+    /// carregadas no tamanho antigo saem do LRU e voltam pelo `cover_loader` no tamanho novo.
+    fn sync_cover_scale(&mut self, window: &mut Window) {
+        let scale = window.scale_factor();
+        if scale == self.cover_scale {
+            return;
+        }
+        self.cover_scale = scale;
+        set_cover_output_size(&self.cover_loader, &self.grid_metrics, scale);
+        for evicted in self.textures.borrow_mut().clear() {
+            let _ = window.drop_image(evicted);
+        }
+    }
+
     fn row_sizes_for_columns(&mut self, columns: usize) -> Rc<Vec<Size<Pixels>>> {
         let row_count = self.grid_metrics.row_count(self.entries.len(), columns);
         if self.cached_row_sizes.0 != columns || self.cached_row_sizes.1.len() != row_count {
@@ -1320,11 +1344,20 @@ impl LauncherApp {
     }
 }
 
+/// Pede ao `cover_loader` as capas no tamanho do card em pixels físicos.
+fn set_cover_output_size(cover_loader: &CoverLoader, metrics: &GridMetrics, scale: f32) {
+    cover_loader.set_output_size(
+        (metrics.card_width * scale).round() as u32,
+        (metrics.cover_height * scale).round() as u32,
+    );
+}
+
 impl Render for LauncherApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(rec) = &mut self.benchmark_recorder {
             rec.poll();
         }
+        self.sync_cover_scale(window);
 
         let viewport = window.viewport_size();
         let vw = if viewport.width > px(100.) {
@@ -1371,10 +1404,11 @@ impl Render for LauncherApp {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_mouse_move(cx.listener(|app, _: &MouseMoveEvent, _window, cx| {
-                if !app.pointer_active {
-                    app.pointer_active = true;
-                    cx.notify();
-                }
+                app.activate_pointer(cx);
+            }))
+            // Um clique sem mexer o mouse também mostra o cursor de volta (`WM_SETCURSOR`).
+            .on_any_mouse_down(cx.listener(|app, _: &MouseDownEvent, _window, cx| {
+                app.activate_pointer(cx);
             }))
             .on_action(cx.listener(Self::on_quit))
             .on_action(cx.listener(Self::on_nav_up))
