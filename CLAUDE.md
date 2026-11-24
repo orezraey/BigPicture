@@ -47,3 +47,9 @@ Launcher de jogos em tela cheia estilo Steam Big Picture para **Windows** e **Li
   - Sem `gpui-fast`: `cargo run --release --no-default-features`
   - Registrar resultados em `docs/benchmarks.md`.
 - Escopo do Marco 1: spike técnico completo (sem integração Steam/Epic nem conquistas, reservados ao Marco 2).
+
+## Commits e PRs
+
+- Nunca incluir coautoria ou atribuição de IA: sem `Co-Authored-By: Claude`, sem `Claude-Session:`, sem rodapé `Generated with Claude Code`.
+- Autor dos commits: `orezraey <49327055+orezraey@users.noreply.github.com>` (configurado no `.git/config` local; o repositório é público).
+
