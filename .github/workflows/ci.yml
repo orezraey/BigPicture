@@ -45,15 +45,22 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # O link direto do MSI 1.24.10 no freedesktop.org passou a dar 404; o choco empacota
-          # os instaladores oficiais (runtime + devel MSVC x86_64).
-          choco install gstreamer gstreamer-devel pkgconfiglite -y --no-progress
-          $gstPrefix = "C:\gstreamer\1.0\msvc_x86_64"
-          if (-not (Test-Path "$gstPrefix\lib\pkgconfig\gstreamer-1.0.pc")) {
-            $found = Get-ChildItem -Path "C:\gstreamer", "C:\Program Files\gstreamer" -Recurse -Filter "gstreamer-1.0.pc" -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $found) { throw "gstreamer-1.0.pc não encontrado após a instalação" }
-            $gstPrefix = $found.Directory.Parent.Parent.FullName
+          # MSIs oficiais (runtime + devel, MSVC x86_64). O devel já traz o pkg-config.exe.
+          # Novas tentativas porque o servidor de download às vezes falha.
+          $ver = "1.26.9"
+          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$ver/msvc"
+          foreach ($kind in @("", "-devel")) {
+            $name = "gstreamer-1.0$kind-msvc-x86_64-$ver.msi"
+            $msi = Join-Path $env:RUNNER_TEMP $name
+            for ($try = 1; $try -le 4; $try++) {
+              try { Invoke-WebRequest -Uri "$base/$name" -OutFile $msi -ErrorAction Stop; break }
+              catch { if ($try -eq 4) { throw }; Start-Sleep -Seconds (15 * $try) }
+            }
+            $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" ADDLOCAL=ALL /qn /norestart" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "msiexec $name terminou com $($p.ExitCode)" }
           }
+          $gstPrefix = "C:\Program Files\gstreamer\1.0\msvc_x86_64"
+          if (-not (Test-Path "$gstPrefix\lib\pkgconfig\gstreamer-1.0.pc")) { throw "gstreamer-1.0.pc não encontrado em $gstPrefix" }
           echo "GSTREAMER_1_0_ROOT_MSVC_X86_64=$gstPrefix\" >> $env:GITHUB_ENV
           echo "PKG_CONFIG_PATH=$gstPrefix\lib\pkgconfig" >> $env:GITHUB_ENV
           echo "$gstPrefix\bin" >> $env:GITHUB_PATH
