@@ -9,7 +9,8 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bigpicture_core::{CatalogEntry, GridMetrics};
+use bigpicture_core::{CatalogEntry, Direction, GridMetrics};
+use bigpicture_input::NavCommand;
 use bigpicture_media::{
     COVER_HEIGHT, COVER_WIDTH, CacheOutcome, CoverCache, CoverLoaded, CoverLoader,
     ensure_demo_covers,
@@ -31,7 +32,17 @@ const TARGET_CARD_COUNT: usize = 1_000;
 const GPU_COVER_LRU_CAPACITY: usize = 192;
 const KEY_CONTEXT: &str = "BigPictureRoot";
 
-actions!(bigpicture, [Quit]);
+actions!(
+    bigpicture,
+    [Quit, NavUp, NavDown, NavLeft, NavRight, NavConfirm, NavBack, NavMenu, NavGuide]
+);
+
+/// Canais que alimentam a janela a partir de threads de fundo.
+struct InputChannels {
+    covers: std::sync::mpsc::Receiver<CoverLoaded>,
+    /// `None` quando a thread do controle não pôde ser criada (só teclado).
+    nav: Option<std::sync::mpsc::Receiver<NavCommand>>,
+}
 
 struct LauncherApp {
     focus_handle: FocusHandle,
@@ -45,6 +56,8 @@ struct LauncherApp {
     cache_hits: usize,
     cache_misses: usize,
     benchmark_recorder: Option<ScrollBenchmarkRecorder>,
+    /// Índice do card com o foco de navegação (controle e teclado).
+    focused: usize,
 }
 
 impl LauncherApp {
@@ -52,7 +65,7 @@ impl LauncherApp {
         monitor_info: SelectedMonitorInfo,
         entries: Vec<CatalogEntry>,
         cover_loader: CoverLoader,
-        cover_rx: std::sync::mpsc::Receiver<CoverLoaded>,
+        channels: InputChannels,
         benchmark_scroll: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -71,7 +84,29 @@ impl LauncherApp {
         let benchmark_recorder =
             benchmark_scroll.then(|| ScrollBenchmarkRecorder::new(window.window_handle().window_id()));
 
-        let shared_rx = Arc::new(Mutex::new(cover_rx));
+        if let Some(nav_rx) = channels.nav {
+            let nav_rx = Arc::new(Mutex::new(nav_rx));
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    let rx = Arc::clone(&nav_rx);
+                    let cmd = cx
+                        .background_spawn(async move { rx.lock().ok()?.recv().ok() })
+                        .await;
+                    let Some(cmd) = cmd else {
+                        break;
+                    };
+                    if this
+                        .update_in(cx, |app, window, cx| app.handle_nav(cmd, window, cx))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
+        let shared_rx = Arc::new(Mutex::new(channels.covers));
         cx.spawn_in(window, async move |this, cx| {
             loop {
                 let rx_wait = Arc::clone(&shared_rx);
@@ -170,7 +205,76 @@ impl LauncherApp {
             cache_hits: 0,
             cache_misses: 0,
             benchmark_recorder,
+            focused: 0,
         }
+    }
+
+    /// Aplica um comando de navegação vindo do controle (thread `bp-gamepad`) ou do teclado.
+    fn handle_nav(&mut self, cmd: NavCommand, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dir) = cmd.direction() {
+            self.move_focus(dir, cx);
+            return;
+        }
+        let entry = self.entries.get(self.focused);
+        match cmd {
+            // Iniciar o jogo depende de `SystemControl::launch_app` (crate `system`, próximo item).
+            NavCommand::Confirm => tracing::info!(
+                index = self.focused,
+                title = entry.map(CatalogEntry::title),
+                "confirmar no card focado"
+            ),
+            NavCommand::Back | NavCommand::Menu | NavCommand::Guide => {
+                tracing::info!(command = ?cmd, "comando sem tela associada ainda");
+            }
+            _ => {}
+        }
+    }
+
+    /// Move o foco na grade e rola para deixar a linha focada no centro da área visível.
+    fn move_focus(&mut self, dir: Direction, cx: &mut Context<Self>) {
+        let columns = self.cached_row_sizes.0.max(1);
+        let Some(next) = self
+            .grid_metrics
+            .navigate(self.focused, columns, self.entries.len(), dir)
+        else {
+            return;
+        };
+        self.focused = next;
+        self.scroll_handle
+            .scroll_to_item(next / columns, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn on_nav_up(&mut self, _: &NavUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Up, window, cx);
+    }
+
+    fn on_nav_down(&mut self, _: &NavDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Down, window, cx);
+    }
+
+    fn on_nav_left(&mut self, _: &NavLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Left, window, cx);
+    }
+
+    fn on_nav_right(&mut self, _: &NavRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Right, window, cx);
+    }
+
+    fn on_nav_confirm(&mut self, _: &NavConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Confirm, window, cx);
+    }
+
+    fn on_nav_back(&mut self, _: &NavBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Back, window, cx);
+    }
+
+    fn on_nav_menu(&mut self, _: &NavMenu, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Menu, window, cx);
+    }
+
+    fn on_nav_guide(&mut self, _: &NavGuide, window: &mut Window, cx: &mut Context<Self>) {
+        self.handle_nav(NavCommand::Guide, window, cx);
     }
 
     fn ingest_loaded_covers(&mut self, batch: Vec<CoverLoaded>, window: &mut Window) {
@@ -269,6 +373,11 @@ impl LauncherApp {
             .bg(rgb(0x131924))
             .border_1()
             .border_color(hsla(0.0, 0.0, 1.0, 0.09))
+            .when(ix == self.focused, |card| {
+                card.border_2()
+                    .border_color(rgb(0x58a6ff))
+                    .bg(rgb(0x1b2434))
+            })
             .hover(|style| {
                 style
                     .border_color(rgb(0x58a6ff))
@@ -446,6 +555,14 @@ impl Render for LauncherApp {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_quit))
+            .on_action(cx.listener(Self::on_nav_up))
+            .on_action(cx.listener(Self::on_nav_down))
+            .on_action(cx.listener(Self::on_nav_left))
+            .on_action(cx.listener(Self::on_nav_right))
+            .on_action(cx.listener(Self::on_nav_confirm))
+            .on_action(cx.listener(Self::on_nav_back))
+            .on_action(cx.listener(Self::on_nav_menu))
+            .on_action(cx.listener(Self::on_nav_guide))
             .relative()
             .size_full()
             .flex()
@@ -497,6 +614,19 @@ fn main() -> anyhow::Result<()> {
 
     let benchmark_scroll = cli.benchmark_scroll();
 
+    let (nav_tx, nav_rx) = std::sync::mpsc::channel();
+    let nav_rx = match bigpicture_input::gamepad::spawn(nav_tx) {
+        Ok(_) => Some(nav_rx),
+        Err(err) => {
+            tracing::warn!(error = %err, "falha ao criar a thread do controle; só teclado");
+            None
+        }
+    };
+    let channels = InputChannels {
+        covers: cover_rx,
+        nav: nav_rx,
+    };
+
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -506,6 +636,12 @@ fn main() -> anyhow::Result<()> {
             cx.bind_keys([
                 KeyBinding::new("alt-f4", Quit, None),
                 KeyBinding::new("escape", Quit, Some(KEY_CONTEXT)),
+                KeyBinding::new("up", NavUp, Some(KEY_CONTEXT)),
+                KeyBinding::new("down", NavDown, Some(KEY_CONTEXT)),
+                KeyBinding::new("left", NavLeft, Some(KEY_CONTEXT)),
+                KeyBinding::new("right", NavRight, Some(KEY_CONTEXT)),
+                KeyBinding::new("enter", NavConfirm, Some(KEY_CONTEXT)),
+                KeyBinding::new("backspace", NavBack, Some(KEY_CONTEXT)),
             ]);
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
 
@@ -529,7 +665,7 @@ fn main() -> anyhow::Result<()> {
                         monitor_info,
                         entries,
                         cover_loader,
-                        cover_rx,
+                        channels,
                         benchmark_scroll,
                         window,
                         cx,

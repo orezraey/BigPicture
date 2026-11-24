@@ -2,6 +2,10 @@
 
 use std::path::PathBuf;
 
+pub mod spatial;
+
+pub use spatial::{Direction, navigate_rects};
+
 /// Unique identifier for a game or launchable entry in the library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AppId(String);
