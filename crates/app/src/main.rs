@@ -174,6 +174,17 @@ impl LauncherApp {
     }
 
     fn ingest_loaded_covers(&mut self, batch: Vec<CoverLoaded>, window: &mut Window) {
+        let ingest_start = std::time::Instant::now();
+        let covers = batch.len();
+        self.ingest_batch(batch, window);
+        // Roda fora de `Window::draw`; medido à parte para comparar com o Rune, cujo `poll`
+        // (onde as capas chegam) entra no `update_ms`.
+        if let Some(rec) = &mut self.benchmark_recorder {
+            rec.record_ingest(ingest_start.elapsed(), covers);
+        }
+    }
+
+    fn ingest_batch(&mut self, batch: Vec<CoverLoaded>, window: &mut Window) {
         let mut lru = self.textures.borrow_mut();
         for item in batch {
             match item.outcome {
